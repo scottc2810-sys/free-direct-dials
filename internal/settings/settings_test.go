@@ -134,3 +134,55 @@ func TestSmartLinkPlacements(t *testing.T) {
 		t.Fatal("unknown placement accepted")
 	}
 }
+
+func TestVASTMode(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	base := Defaults().Ads
+	save := func(mut func(a *Ads)) error {
+		a := base
+		mut(&a)
+		b, _ := json.Marshal(a)
+		_, err := s.Save(ctx, "ads", b, "boss")
+		return err
+	}
+	if err := save(func(a *Ads) { a.Mode = "vast" }); err == nil || !strings.Contains(err.Error(), "VAST tag") {
+		t.Fatalf("vast mode without tags: %v", err)
+	}
+	for _, bad := range []string{"http://ads.example.com/vast.xml", "javascript:alert(1)", "https://x.com/a b", `https://x.com/"><script>`} {
+		if err := save(func(a *Ads) { a.Mode = "vast"; a.VASTTags = []string{bad} }); err == nil {
+			t.Fatalf("bad tag accepted: %q", bad)
+		}
+	}
+	tag := "https://ads.example.com/vast?zone=1&cb=[CACHEBUSTER]&url={page_url}"
+	if err := save(func(a *Ads) {
+		a.Mode = "vast"
+		a.VASTTags = []string{" " + tag, "", tag, "https://b.example.net/v.xml"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get().Ads.VASTTags; len(got) != 2 || got[0] != tag {
+		t.Fatalf("tags not cleaned: %v", got)
+	}
+	var pub Public
+	json.Unmarshal(s.PublicJSON(), &pub)
+	if pub.Ads.Mode != "vast" || len(pub.Ads.VASTTags) != 2 {
+		t.Fatalf("public vast: %+v", pub.Ads)
+	}
+	if err := save(func(a *Ads) { a.Mode = "sponsor"; a.VASTTags = []string{tag} }); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal(s.PublicJSON(), &pub)
+	pub = Public{}
+	json.Unmarshal(s.PublicJSON(), &pub)
+	if len(pub.Ads.VASTTags) != 0 {
+		t.Fatal("tags published while VAST mode is off")
+	}
+	six := []string{}
+	for i := 0; i < 6; i++ {
+		six = append(six, "https://x"+string(rune('a'+i))+".example.com/v")
+	}
+	if err := save(func(a *Ads) { a.VASTTags = six }); err == nil {
+		t.Fatal("6 tags accepted")
+	}
+}

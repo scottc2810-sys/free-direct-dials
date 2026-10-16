@@ -19,6 +19,7 @@ type Public struct {
 		Label          string                `json:"label"`
 		CTA            string                `json:"cta"`
 		GPTAdUnit      string                `json:"gpt_ad_unit,omitempty"`
+		VASTTags       []string              `json:"vast_tags,omitempty"`
 		PreviewGate    bool                  `json:"preview_gate"`
 		PreviewSeconds int                   `json:"preview_seconds"`
 	} `json:"ads"`
@@ -108,6 +109,9 @@ func BuildPublic(a All) Public {
 	p.Ads.PreviewGate, p.Ads.PreviewSeconds = a.Ads.PreviewGate, a.Ads.PreviewSeconds
 	if a.Ads.Mode == "gpt_rewarded" {
 		p.Ads.GPTAdUnit = a.Ads.GPTAdUnit
+	}
+	if a.Ads.Mode == "vast" {
+		p.Ads.VASTTags = a.Ads.VASTTags
 	}
 	p.Affiliates.Label = a.Affiliates.Label
 	p.Affiliates.Items = []PublicAffiliate{}

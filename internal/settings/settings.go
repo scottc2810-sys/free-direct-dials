@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -35,7 +36,7 @@ type Slot struct {
 }
 
 type Ads struct {
-	Mode       string          `json:"mode"` // sponsor | smartlink | gpt_rewarded
+	Mode       string          `json:"mode"` // sponsor | smartlink | gpt_rewarded | vast
 	SmartLink  string          `json:"smartlink"`
 	MinSeconds int             `json:"min_seconds"`
 	Adblock    string          `json:"adblock"`   // allow | nudge | require
@@ -50,6 +51,10 @@ type Ads struct {
 	// Google Ad Manager rewarded ad unit (mode gpt_rewarded), e.g. /1234567/fdd_rewarded.
 	// When Google has no ad to show, the visitor gets the sponsor break instead.
 	GPTAdUnit string `json:"gpt_ad_unit"`
+
+	// VAST tag URLs (mode vast), tried in order until one fills: any network's
+	// video tags (HilltopAds, Adsterra, Ad Manager…), played by Google's IMA SDK.
+	VASTTags []string `json:"vast_tags"`
 
 	// Each further page of masked preview rows opens after a short sponsor break.
 	PreviewGate    bool `json:"preview_gate"`
@@ -230,8 +235,12 @@ func limitLen(errs *[]error, field, v string, n int) string {
 func (a *All) Validate() error {
 	var errs []error
 	ad := &a.Ads
-	if !oneOf(ad.Mode, "sponsor", "smartlink", "gpt_rewarded") {
-		errs = append(errs, errors.New("ads.mode must be sponsor, smartlink or gpt_rewarded"))
+	if !oneOf(ad.Mode, "sponsor", "smartlink", "gpt_rewarded", "vast") {
+		errs = append(errs, errors.New("ads.mode must be sponsor, smartlink, gpt_rewarded or vast"))
+	}
+	ad.VASTTags = cleanVASTTags(&errs, ad.VASTTags)
+	if ad.Mode == "vast" && len(ad.VASTTags) == 0 {
+		errs = append(errs, errors.New("VAST video mode needs at least one VAST tag URL"))
 	}
 	ad.GPTAdUnit = strings.TrimSpace(ad.GPTAdUnit)
 	if ad.GPTAdUnit != "" && !gptUnitRe.MatchString(ad.GPTAdUnit) {
@@ -488,6 +497,32 @@ func (a *All) Validate() error {
 		errs = append(errs, errors.New("consent mode must be all, eu_only or off"))
 	}
 	return errors.Join(errs...)
+}
+
+// cleanVASTTags keeps up to five distinct https tag URLs. Network macros such
+// as [CACHEBUSTER] or {page_url} are allowed; the page fills them in.
+func cleanVASTTags(errs *[]error, tags []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for i, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		u, err := url.Parse(t)
+		if err != nil || u.Scheme != "https" || u.Host == "" || len(t) > 4000 || strings.ContainsAny(t, "<>\"' \t\r\n\x00") {
+			*errs = append(*errs, fmt.Errorf("VAST tag %d must be a single https URL", i+1))
+			continue
+		}
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	if len(out) > 5 {
+		*errs = append(*errs, errors.New("at most 5 VAST tags"))
+	}
+	return out
 }
 
 // cleanAdsTxt normalises ads.txt: LF line ends, trimmed lines, size limits and

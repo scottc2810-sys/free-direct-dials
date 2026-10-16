@@ -301,3 +301,25 @@ func TestViewPagesThroughEverything(t *testing.T) {
 		t.Fatalf("paged %d rows in %d pages, want 40 in 4", len(seen), pages)
 	}
 }
+
+func TestVideoModesUseTheFloor(t *testing.T) {
+	e := newEnv(t, 50)
+	ctx := context.Background()
+	for _, mode := range []string{"vast", "gpt_rewarded"} {
+		cfg := e.svc.Settings.Get()
+		if minSeconds(mode, cfg) != 5 || minSeconds("sponsor", cfg) != cfg.Ads.MinSeconds {
+			t.Fatalf("%s floor", mode)
+		}
+		tok := e.watch(t, 1)
+		e.svc.DB.W.Exec(`UPDATE ad_tokens SET mode=? WHERE id=?`, mode, tok)
+		e.clk.Advance(2 * time.Second)
+		var ts *TooSoonError
+		if _, err := e.svc.Claim(ctx, 1, tok, f(t, ""), ""); !errors.As(err, &ts) {
+			t.Fatalf("%s: 2 s must be too early, got %v", mode, err)
+		}
+		e.clk.Advance(3 * time.Second)
+		if _, err := e.svc.Claim(ctx, 1, tok, f(t, ""), ""); err != nil {
+			t.Fatalf("%s: 5 s video must unlock: %v", mode, err)
+		}
+	}
+}

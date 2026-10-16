@@ -48,9 +48,10 @@ func (e *TooSoonError) Error() string {
 
 const maxActiveTokens = 3
 
-// gptFloor is the minimum token age in Google rewarded mode: Google grants the
-// reward only after the ad completes, so the server floor just stops scripts.
-const gptFloor = 5
+// videoFloor is the minimum token age in the video modes (Google rewarded,
+// VAST): the page unlocks only when the video completes, so the server floor
+// just stops scripts.
+const videoFloor = 5
 
 type Service struct {
 	DB       *db.DB            // control database: tokens, quotas, batch numbers
@@ -82,8 +83,8 @@ type Token struct {
 
 // minSeconds is how long a token of mode must age before it can be claimed.
 func minSeconds(mode string, cfg settings.All) int {
-	if mode == "gpt_rewarded" {
-		return min(cfg.Ads.MinSeconds, gptFloor)
+	if mode == "gpt_rewarded" || mode == "vast" {
+		return min(cfg.Ads.MinSeconds, videoFloor)
 	}
 	return cfg.Ads.MinSeconds
 }

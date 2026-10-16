@@ -620,7 +620,7 @@
       return;
     }
     st.dock = 'idle';
-    const video = rewardedOn();
+    const video = rewardedOn() || vastOn();
     const k = Math.min(N(), left || N());
     const btn = h('button', { class: 'btn btn-primary btn-big', type: 'button', 'data-unlock': '' }, icon('lock'), video ? 'Watch a short video, unlock ' + k : 'Unlock next ' + k + ' contacts');
     const what = video ? 'short sponsor video' : 'short sponsor break';
@@ -642,7 +642,7 @@
     catch (e) { return dockError(e); }
     st.token = tok.token;
     const m = tok.mode || mode;
-    (m === 'smartlink' ? smartlinkBreak : m === 'gpt_rewarded' && S().ads.gpt_ad_unit ? rewardedBreak : sponsorBreak)(tok);
+    (m === 'smartlink' ? smartlinkBreak : m === 'gpt_rewarded' && S().ads.gpt_ad_unit ? rewardedBreak : m === 'vast' && vastOn() ? vastBreak : sponsorBreak)(tok);
   }
 
   function dockError(e) {
@@ -690,6 +690,109 @@
     if (blocked && policy === 'require') { secs.textContent = ''; return; }
     secs.textContent = 'Unlocking…';
     claim(tok.token); // no extra click: contacts appear the moment the break ends
+  }
+
+  // ----- VAST video break: any network's VAST tags, played by Google's IMA SDK -----
+  // Tags are tried in order (waterfall) until one plays; the contacts unlock when
+  // the video completes (or is skipped once skippable); no fill anywhere means
+  // the normal sponsor break, on the same token.
+  const vastOn = () => S().ads.mode === 'vast' && (S().ads.vast_tags || []).length > 0;
+  let imaLoading;
+  function loadIMA() {
+    return (imaLoading = imaLoading || new Promise((res, rej) => {
+      if (window.google && window.google.ima) { res(); return; }
+      const sc = h('script', { src: 'https://imasdk.googleapis.com/js/sdkloader/ima3.js', async: true });
+      sc.onload = () => (window.google && window.google.ima ? res() : rej(new Error('ima')));
+      sc.onerror = () => { imaLoading = null; rej(new Error('ima')); };
+      document.head.append(sc);
+    }));
+  }
+  // the macros networks use most; each network documents its own
+  function vastURL(tag, w, hh) {
+    const rnd = String(Math.floor(Math.random() * 1e12));
+    const page = encodeURIComponent(location.origin + location.pathname);
+    return tag
+      .replace(/\[(CACHEBUSTER|CACHEBUSTING|TIMESTAMP|RANDOM)\]|\{(cachebuster|timestamp|random)\}|%%CACHEBUSTER%%/gi, rnd)
+      .replace(/\[(PAGE_URL|REFERRER_URL|URL)\]|\{(page_url|referrer_url|url)\}|%%(PAGE_URL|REFERRER_URL)%%/gi, page)
+      .replace(/\[(WIDTH|PLAYER_WIDTH)\]|\{(width|player_width)\}/gi, String(w))
+      .replace(/\[(HEIGHT|PLAYER_HEIGHT)\]|\{(height|player_height)\}/gi, String(hh));
+  }
+  function vastBreak(tok) {
+    const { d, secs, note } = breakShell('Sponsor video');
+    const box = h('div', { class: 'vast', hidden: true });
+    const video = h('video', { playsinline: true, 'webkit-playsinline': true, preload: 'none' });
+    const adEl = h('div', { class: 'vast-ad' });
+    box.append(video, adEl);
+    const status = h('p', { class: 'muted' }, 'A short video from our sponsor. Your ' + N() + ' contacts appear the moment it ends.');
+    const play = h('button', { class: 'btn btn-primary btn-big', type: 'button' }, 'Play the video (about 15–30 s)');
+    const tags = S().ads.vast_tags || [];
+    let settled = false, started = false, idx = 0, timer = 0, adc = null, loader = null, mgr = null, muted = false;
+    const ready = loadIMA(); // preload while the visitor reads, so Play starts at once
+    ready.catch(() => { /* handled on Play */ });
+    const failed = e => { // operators can see in the console why a network didn't fill
+      try { const er = e && e.getError && e.getError(); console.warn('VAST tag ' + idx + ' had no video: ' + (er ? er.getErrorCode() + ' ' + er.getMessage() : 'timeout')); } catch { /* ignore */ }
+      next();
+    };
+    const live = () => !settled && st.dock === 'break' && st.token === tok.token;
+    const onResize = () => { if (!mgr) return; const [w, hh] = size(); try { mgr.resize(w, hh, window.google.ima.ViewMode.NORMAL); } catch { /* gone */ } };
+    const done = () => {
+      settled = true; clearTimeout(timer); window.removeEventListener('resize', onResize);
+      for (const x of [mgr, loader, adc]) { try { if (x) x.destroy(); } catch { /* already gone */ } }
+      mgr = loader = adc = null;
+    };
+    const fallback = () => { if (!live()) return; done(); sponsorBreak(tok, 'No sponsor video right now, so here is a short sponsor break instead.'); };
+    const finished = () => { if (!live() || !started) return; done(); secs.textContent = 'Unlocking…'; claim(tok.token); };
+    const size = () => { const w = Math.max(240, Math.round(box.clientWidth || 320)); return [w, Math.round(w * 9 / 16)]; };
+    const next = () => { // waterfall: the next network's tag, then the banner break
+      if (!live()) return;
+      if (started) return finished();
+      if (idx >= tags.length) return fallback();
+      const ima = window.google.ima, [w, hh] = size();
+      try { if (mgr) mgr.destroy(); } catch { /* gone */ }
+      mgr = null;
+      const req = new ima.AdsRequest();
+      req.adTagUrl = vastURL(tags[idx++], w, hh);
+      req.linearAdSlotWidth = w; req.linearAdSlotHeight = hh;
+      req.nonLinearAdSlotWidth = w; req.nonLinearAdSlotHeight = Math.round(hh / 3);
+      req.setAdWillAutoPlay(true); req.setAdWillPlayMuted(muted);
+      clearTimeout(timer); timer = setTimeout(failed, 8000); // this network didn't answer in time
+      loader.requestAds(req);
+    };
+    play.addEventListener('click', () => {
+      play.hidden = true; box.hidden = false; status.textContent = 'Loading the video…'; secs.textContent = '';
+      // sound needs a real click that the browser still counts as recent; otherwise play muted
+      muted = !(navigator.userActivation ? navigator.userActivation.isActive : true);
+      video.muted = muted;
+      const setup = () => {
+        if (!live()) return;
+        const ima = window.google.ima;
+        adc = new ima.AdDisplayContainer(adEl, video);
+        adc.initialize(); // synchronous inside the click when the SDK is already loaded
+        loader = new ima.AdsLoader(adc);
+        loader.addEventListener(ima.AdErrorEvent.Type.AD_ERROR, failed);
+        loader.addEventListener(ima.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, e => {
+          if (!live()) return;
+          const rs = new ima.AdsRenderingSettings();
+          rs.restoreCustomPlaybackStateOnAdBreakComplete = false;
+          mgr = e.getAdsManager(video, rs);
+          const E = ima.AdEvent.Type;
+          mgr.addEventListener(ima.AdErrorEvent.Type.AD_ERROR, failed);
+          mgr.addEventListener(E.STARTED, () => { started = true; clearTimeout(timer); secs.textContent = 'Playing'; status.textContent = 'Your contacts unlock when the video ends.'; });
+          mgr.addEventListener(E.COMPLETE, finished);
+          mgr.addEventListener(E.SKIPPED, finished);
+          mgr.addEventListener(E.ALL_ADS_COMPLETED, () => (started ? finished() : next())); // an empty pod: next network
+          const [w, hh] = size();
+          try { mgr.init(w, hh, ima.ViewMode.NORMAL); if (muted) mgr.setVolume(0); mgr.start(); } catch (er) { failed(); return; }
+          clearTimeout(timer); timer = setTimeout(() => { if (!started) failed(); }, 10000); // loaded but never played
+        });
+        window.addEventListener('resize', onResize);
+        next();
+      };
+      if (window.google && window.google.ima) setup();
+      else ready.then(setup, fallback);
+    });
+    d.append(status, box, h('div', { class: 'row' }, play, h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { done(); dockSet('idle'); } }, 'Cancel')), note);
+    play.focus({ preventScroll: true });
   }
 
   // ----- Google Ad Manager rewarded video (falls back to the sponsor break) -----

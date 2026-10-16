@@ -74,18 +74,19 @@ func (a *App) baseData(page string) pageData {
 // rewarded ads: both must run third-party (and inline) script in the page.
 func (a *App) publicCSP() string {
 	cfg := a.Settings.Get()
-	direct := cfg.Ads.Mode == "gpt_rewarded"
+	direct := cfg.Ads.Mode == "gpt_rewarded" || cfg.Ads.Mode == "vast" // ad SDKs load more script
 	for _, s := range cfg.Ads.Slots {
 		if s.Enabled && s.Isolation == "direct" {
 			direct = true
 		}
 	}
-	script := "'self' https://challenges.cloudflare.com"
+	script, style, font := "'self' https://challenges.cloudflare.com", "'self' 'unsafe-inline'", "'self'"
 	if direct {
-		script = "'self' 'unsafe-inline' 'unsafe-eval' https: http:"
+		// ad SDKs and players bring their own scripts, stylesheets and fonts
+		script, style, font = "'self' 'unsafe-inline' 'unsafe-eval' https: http:", "'self' 'unsafe-inline' https:", "'self' https: data:"
 	}
-	return "default-src 'self'; script-src " + script + "; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
-		"font-src 'self'; connect-src 'self' https:; frame-src 'self' https: ; media-src https:; object-src 'none'; " +
+	return "default-src 'self'; script-src " + script + "; style-src " + style + "; img-src 'self' data: https:; " +
+		"font-src " + font + "; connect-src 'self' https:; frame-src 'self' https: ; media-src https: blob:; object-src 'none'; " +
 		"base-uri 'none'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
 }
 

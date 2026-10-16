@@ -8,6 +8,7 @@
 |---|---|---|---|
 | **1. Now** | **Adsterra** (you already have the Smart Link) | Easiest approval for a new site; display, native and Smart Link formats | Ads & Smart Link → slots + Smart Link |
 | **1. Now** | **Partner offers (affiliates)**: Apollo.io and Lusha via PartnerStack | Your visitors want *more B2B data*, so a data-tool referral is the most relevant offer. Recurring commission on paying referrals | Partner offers |
+| **1. Now** | **VAST video break**: HilltopAds (no traffic minimum) and/or Adsterra video tags | Paid video today without waiting for Google; same "watch to unlock" flow | Ads & Smart Link → mode *VAST video break* + tag URLs |
 | **1. Now** | **WhatsApp bulk / custom data** (+91 98343 46179, already live) | One custom-list sale can be worth more than months of ad revenue | WhatsApp |
 | **2. After 2–4 weeks of real traffic** | **Google AdSense** → **Google Ad Manager rewarded video** | Rewarded video is an explicit "watch to unlock", which fits the unlock model exactly | Ads & Smart Link → mode *Google rewarded* + ad unit path |
 | 3. Backup | Monetag (one network for pops/vignettes, not two) | Low payout floor; useful if Adsterra fill drops in some country | Paste its code into a slot |
@@ -26,6 +27,26 @@ What the site does now (all switchable in Superadmin):
 - **The value exchange is explicit.** People knowingly trade a short ad for 10 contacts. Rewarded formats, where the user opts in, are designed for exactly that, and they pay better than banners that people ignore.
 - **Visitors come back.** Up to 50 unlocks a day per user, plus "new data" emails, bring the same people back to watch more ads.
 - **Never pay for clicks.** Adsterra and Google both ban rewarding a click on an ad. The site rewards *viewing* (a timed break or a completed video), never clicking. Keep it that way.
+
+## 0. VAST video break (paid video now, no traffic minimum)
+
+Any network that hands you a **VAST tag URL** can fill the unlock break with a video. The page plays it with Google's free IMA player, and the 10 contacts unlock the moment the video ends.
+
+1. **HilltopAds**: sign up as a publisher → add `markemindai.com` → choose **mainstream** (not adult) inventory → create a **Video VAST** zone → copy its VAST tag URL. No traffic minimum, weekly payouts.
+2. **Adsterra**: in your publisher dashboard, check whether *Create code* offers a VAST / video format for your site. If it does, copy that URL too.
+3. **Superadmin → Ads**:
+   - Set *Unlock mode* = **VAST video break**.
+   - Paste the tag URLs, one per line, best payer first.
+   - Save.
+4. How it behaves:
+   - The visitor clicks *Watch a short video, unlock 10* → *Play the video*.
+   - The first tag with a video plays (up to 5 are tried, 8 s each); the contacts unlock when it completes, or when a skippable ad is skipped.
+   - No video from any tag means the normal banner sponsor break, so the visitor still gets the contacts.
+   - Macros like `[CACHEBUSTER]`, `[TIMESTAMP]` and `{page_url}` are filled in automatically.
+   - If the browser won't allow sound (no recent real click), the video plays muted.
+   - When a network doesn't fill, the browser console shows why (`VAST tag 2 had no video: <code> <reason>`).
+5. Once Google approves you, an **Ad Manager video ad unit's VAST tag** can go first in the same list. This is often simpler than the rewarded mode, and all your other tags stay as backups.
+6. Verified with Google's public IMA sample tag: a broken first tag was skipped, the sample video played (about 10 s), and the contacts unlocked when it ended.
 
 ## 1. Adsterra (do this first, about 15 minutes)
 

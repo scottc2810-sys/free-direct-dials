@@ -396,7 +396,14 @@
         name === 'global' ? null : h('a', { class: 'note', href: BASE + '/ad-frame?slot=' + name, target: '_blank', rel: 'noopener' }, 'Preview saved slot ↗'));
     });
     return [
-      input({ k: 'mode', t: 'select', l: 'Unlock mode', opts: [['sponsor', 'Sponsor break (recommended)'], ['gpt_rewarded', 'Google rewarded video (Ad Manager), sponsor break as fallback'], ['smartlink', 'Smart Link in a new tab']] }, o),
+      input({ k: 'mode', t: 'select', l: 'Unlock mode', opts: [['sponsor', 'Sponsor break (recommended)'], ['vast', 'VAST video break (tags from HilltopAds, Adsterra, any network), sponsor break as fallback'], ['gpt_rewarded', 'Google rewarded video (Ad Manager), sponsor break as fallback'], ['smartlink', 'Smart Link in a new tab']] }, o),
+      (() => {
+        const ta = h('textarea', { class: 'input', id: 'f-vast_tags', rows: '4', spellcheck: 'false', placeholder: 'https://… one VAST tag URL per line' });
+        ta.value = (o.vast_tags || []).join('\n');
+        ta.addEventListener('input', () => { o.vast_tags = ta.value.split('\n').map(x => x.trim()).filter(Boolean); });
+        return h('div', { class: 'field' }, h('label', { for: 'f-vast_tags' }, 'VAST tag URLs (VAST video mode; tried in order, up to 5)'), ta,
+          h('span', { class: 'hint' }, 'Paste the VAST/VPAID tag URL each network gives you for a video zone (HilltopAds: Video VAST; Adsterra: VAST if your account offers it; later your Ad Manager video tag). The first that has a video plays; macros like [CACHEBUSTER] and {page_url} are filled in. Contacts unlock when the video ends; no video anywhere = the normal sponsor break.'));
+      })(),
       input({ k: 'gpt_ad_unit', t: 'text', l: 'Google Ad Manager rewarded ad unit', ph: '/1234567/fdd_rewarded', hint: 'Ad Manager → Inventory → Ad units → a "Rewarded" unit. Its full path, starting with your network code. Contacts unlock the moment Google grants the reward; if Google has no video, visitors get the sponsor break instead.' }, o),
       input({ k: 'smartlink', t: 'url', l: 'Smart Link URL', hint: 'Your Adsterra Smart Link, used by every placement below.' }, o),
       h('div', { class: 'row2' }, input({ k: 'min_seconds', t: 'number', l: 'Break length (seconds)', min: 5, max: 60 }, o),

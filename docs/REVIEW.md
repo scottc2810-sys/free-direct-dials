@@ -32,6 +32,8 @@
 | 20 | Med | Privacy | Supabase connection strings hold a password. | AES-256-GCM sealed under a key derived from `SECRET_KEY`; never returned to the browser; driver errors are password-redacted; `sslmode=disable` refused off localhost. |
 | 21 | Med | Users | Deleting a user left unlocks in remote stores; SQLite can reuse the highest row id, so a new user could inherit them. | Unlocks are forgotten in every store holding them *before* the user row is deleted. If a store is down, the delete waits. |
 | 22 | Low | UI | An empty partner slot printed the word "null" (DOM `append(null)`). | It renders nothing. |
+| 24 | Med | Ads | VAST video: when the IMA SDK only loaded after the Play click, the ad container wasn't initialised inside the click, so browsers blocked unmuted autoplay and every tag "failed" into the banner break. Found in the browser. | The SDK preloads when the break opens and initialises synchronously in the click; the video falls back to muted when the browser reports no user activation. Each tag's failure reason is logged to the console. Re-verified with Google's sample tag. |
+| 25 | Low | Ads | The IMA player's stylesheet/font was blocked by the page CSP. | Video modes allow https styles, fonts and `blob:` media. |
 | 23 | Info | Caching | Complete public responses allow 30 s stale-while-revalidate, so a browser may briefly show the previous answer after an admin change. | Accepted (public data). Pending answers never use it, so live updates always reach the server. |
 
 Verified in the browser (dev server):
