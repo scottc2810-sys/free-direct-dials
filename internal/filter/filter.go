@@ -133,7 +133,9 @@ func truthy(s string) bool {
 // abbreviation ("Chief Executive Officers" → "ceo"), so equivalent searches
 // share one canonical form, cache entry and URL.
 func Tokens(kw string) []string {
-	kw = normalize.Fold(collapseDots(normalize.Truncate(kw, MaxKeyword)))
+	// cut again after folding: decomposition can lengthen it (one Hangul syllable → three letters),
+	// and a canonical keyword over the limit would be cut differently on the next parse
+	kw = normalize.Truncate(normalize.Fold(collapseDots(normalize.Truncate(kw, MaxKeyword))), MaxKeyword)
 	var toks []string
 	for _, t := range strings.FieldsFunc(kw, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
 		if len([]rune(t)) < minTokenRune {
