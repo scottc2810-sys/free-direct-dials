@@ -1,0 +1,16 @@
+{{define "main"}}
+<div class="wrap prose">
+  <h1>Email preferences</h1>
+  {{if .Done}}
+    <p id="unsub-result">{{.Response}}</p>
+  {{else if .Token}}
+    <p>Stop receiving "new contacts added" emails? Your account and unlocked contacts stay as they are.</p>
+    <form class="panel" method="post" action="{{base}}/api/unsub?t={{.Token}}" id="unsub-form">
+      <div class="row"><button class="btn btn-primary" type="submit">Unsubscribe</button></div>
+    </form>
+    <p id="unsub-result" role="status"></p>
+  {{else}}
+    <p>This unsubscribe link is incomplete. Use the link at the bottom of any email from us.</p>
+  {{end}}
+</div>
+{{end}}

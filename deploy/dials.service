@@ -1,0 +1,51 @@
+[Unit]
+Description=Free Direct Dials
+Documentation=file:///opt/dials/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dials
+Group=dials
+WorkingDirectory=/var/lib/dials
+EnvironmentFile=/etc/dials/dials.env
+Environment=DIALS_ENV_FILE=/etc/dials/dials.env GOMEMLIMIT=150MiB GOGC=50
+ExecStart=/opt/dials/current/dials serve
+Restart=always
+RestartSec=2
+TimeoutStopSec=25
+KillSignal=SIGTERM
+
+# Memory: throttle before the kernel OOM-kills anything on a 0.75 GB box.
+MemoryHigh=350M
+MemoryMax=450M
+LimitNOFILE=65536
+UMask=0077
+
+# Sandboxing
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ReadWritePaths=/var/lib/dials /var/backups/dials
+
+[Install]
+WantedBy=multi-user.target

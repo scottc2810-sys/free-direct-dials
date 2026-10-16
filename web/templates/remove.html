@@ -1,0 +1,36 @@
+{{define "main"}}
+<div class="wrap prose">
+  <h1>Remove your details</h1>
+  <p>If your work contact appears in this directory, you can delete it yourself in under a minute. We remove the record immediately and add it to a block list so future uploads skip it.</p>
+
+  <section class="panel" id="rm-email" aria-labelledby="rm-email-h">
+    <h2 id="rm-email-h" style="margin:0">Remove by email address</h2>
+    <form id="rm-start" class="grid2" novalidate>
+      <div class="field"><label for="rm-addr">The email address listed</label><input class="input" id="rm-addr" type="email" autocomplete="email" required maxlength="254"></div>
+      <button class="btn btn-primary" type="submit">Send code</button>
+      <div id="rm-ts"></div>
+    </form>
+    <form id="rm-verify" class="grid2" hidden novalidate>
+      <div class="field"><label for="rm-code">6-digit code we emailed you</label><input class="input otp" id="rm-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></div>
+      <button class="btn btn-primary" type="submit">Delete my record</button>
+    </form>
+    <p id="rm-msg" role="status"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="rm-other-h">
+    <h2 id="rm-other-h" style="margin:0">No access to that email?</h2>
+    <p>Send us your LinkedIn profile URL or phone number instead. We process these by hand within 30 days, usually much sooner.</p>
+    <form id="rm-request" novalidate style="display:grid;gap:12px">
+      <div class="field"><label for="rq-kind">What identifies your record</label>
+        <select class="input" id="rq-kind"><option value="linkedin">LinkedIn profile URL</option><option value="phone">Phone number</option><option value="other">Something else</option></select></div>
+      <div class="field"><label for="rq-value">Value</label><input class="input" id="rq-value" required maxlength="300"></div>
+      <div class="field"><label for="rq-contact">Your email for our reply (optional)</label><input class="input" id="rq-contact" type="email" maxlength="254"></div>
+      <div class="field"><label for="rq-note">Anything else (optional)</label><textarea class="input" id="rq-note" rows="3" maxlength="1000"></textarea></div>
+      <div id="rq-ts"></div>
+      <div><button class="btn" type="submit">Send request</button></div>
+    </form>
+    <p id="rq-msg" role="status"></p>
+  </section>
+  <p class="note" style="margin-top:18px">Removal deletes your contact record from the directory. It does not affect anyone's own sign-in account. See the <a href="{{base}}/privacy">privacy policy</a>.</p>
+</div>
+{{end}}

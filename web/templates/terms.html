@@ -1,0 +1,31 @@
+{{define "main"}}
+<article class="wrap prose">
+  <h1>Terms of Use</h1>
+  <p>By using Free Direct Dials you agree to these terms. If you don't agree, please don't use the directory.</p>
+
+  <h2>What you may do</h2>
+  <p>Search the directory and unlock contacts for legitimate business-to-business outreach, such as introducing a relevant product, service or partnership to someone in their professional role.</p>
+
+  <h2>What you may not do</h2>
+  <ul>
+    <li>Scrape, bulk-download or resell the directory, or use bots, scripts or multiple accounts to get around daily limits.</li>
+    <li>Use contacts for spam, harassment, fraud, or anything unlawful, including sending marketing that ignores opt-out requests.</li>
+    <li>Contact people for personal, non-business purposes.</li>
+    <li>Interfere with the service, its ads or its security checks.</li>
+  </ul>
+  <p>We may suspend accounts that break these rules.</p>
+
+  <h2>Your obligations when you contact people</h2>
+  <p>You are responsible for complying with the anti-spam, privacy and telemarketing laws that apply to you and to the people you contact (for example GDPR and PECR in Europe, CAN-SPAM and TCPA in the United States, and India's DPDP Act), including honouring opt-outs and do-not-call registers.</p>
+
+  <h2>No warranty</h2>
+  <p>Contact data changes constantly. We clean every upload, but we cannot guarantee that any record is accurate or current. The service is provided "as is", and to the extent the law allows we are not liable for indirect or consequential losses.</p>
+
+  <h2>Sponsors and donations</h2>
+  <p>The directory is free because sponsors pay for ads and some visitors donate. Sponsored links are labelled. Donations are voluntary, non-refundable gifts and don't buy extra access.</p>
+
+  <h2>Changes</h2>
+  <p>We may update these terms; the current version is always on this page.</p>
+  <p class="note">{{if .Site.LegalName}}{{.Site.LegalName}}{{else}}MarkeMind AI{{end}}{{if .Site.Address}}, {{.Site.Address}}{{end}}. This text is a starting template and should be reviewed by counsel.</p>
+</article>
+{{end}}

@@ -1,0 +1,62 @@
+{{define "layout.html"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{.Title}}</title>
+{{if .Description}}<meta name="description" content="{{.Description}}">{{end}}
+{{if .Canonical}}<link rel="canonical" href="{{.Canonical}}">{{end}}
+{{if .NoIndex}}<meta name="robots" content="noindex, follow">{{else}}<meta name="robots" content="index, follow, max-image-preview:large">{{end}}
+<meta name="theme-color" content="#fbfcfa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101210" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Free Direct Dials">
+<meta property="og:title" content="{{.Title}}">
+{{if .Description}}<meta property="og:description" content="{{.Description}}">{{end}}
+{{if .Canonical}}<meta property="og:url" content="{{.Canonical}}">{{end}}
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="{{base}}/favicon.svg" type="image/svg+xml">
+<link rel="sitemap" type="application/xml" href="{{base}}/sitemap.xml">
+<link rel="stylesheet" href="{{asset "app.css"}}">
+<link rel="preconnect" href="https://challenges.cloudflare.com" crossorigin>
+{{range .JSONLD}}<script type="application/ld+json">{{json .}}</script>
+{{end}}
+</head>
+<body data-page="{{.Page}}" data-base="{{base}}">
+<a class="skip" href="#main">Skip to content</a>
+<div id="announce" class="announce" hidden></div>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="{{base}}/" aria-label="Free Direct Dials home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M11.2 7.5c.8-.3 1.7 0 2.1.8l1.6 3.4c.3.7.2 1.6-.4 2.1l-1.6 1.4a12.6 12.6 0 0 0 4 4l1.4-1.6c.5-.6 1.4-.8 2.1-.4l3.4 1.6c.8.4 1.1 1.3.8 2.1l-.7 1.9c-.4 1-1.4 1.7-2.5 1.6C14.6 23.6 8.5 17.4 7.7 10.6c-.1-1.1.6-2.1 1.6-2.5z" fill="var(--paper)"/></svg>
+      <span>Free Direct Dials <small>by {{if .Site.LegalName}}{{.Site.LegalName}}{{else}}MarkeMind AI{{end}}</small></span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a class="link" href="{{base}}/#how">How it works</a>
+      <a class="link" href="{{base}}/#faq">FAQ</a>
+      <a class="link" href="{{base}}/#donate">Donate</a>
+      <span data-place="header"></span>
+      <span id="wa-top" data-wa></span>
+      <span class="me" id="me" hidden></span>
+    </nav>
+  </div>
+</header>
+<main id="main">
+{{template "main" .}}
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <span>&copy; {{year}} {{if .Site.LegalName}}{{.Site.LegalName}}{{else}}MarkeMind AI{{end}}</span>
+    <a href="{{base}}/privacy">Privacy</a>
+    <a href="{{base}}/terms">Terms</a>
+    <a href="{{base}}/remove">Remove my data</a>
+    <a href="{{base}}/llms.txt">llms.txt</a>
+    {{if .Site.ContactEmail}}<a href="mailto:{{.Site.ContactEmail}}">{{.Site.ContactEmail}}</a>{{end}}
+    <span class="grow"></span>
+    <span data-place="footer"></span>
+  </div>
+</footer>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="{{asset "app.js"}}" defer></script>
+</body>
+</html>{{end}}

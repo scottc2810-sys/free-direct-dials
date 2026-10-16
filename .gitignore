@@ -1,0 +1,26 @@
+# build output
+/bin/
+/build/
+# local data: never commit databases, uploads, backups or vendor files (personal data)
+/data/
+/bench/
+*.db
+*.db-wal
+*.db-shm
+*.db.zst
+*.db.zst.enc
+*.xlsx
+*.csv
+*.csv.gz
+!internal/**/testdata/**
+# secrets
+dials.env
+/etc/
+# tooling
+.code-review-graph/
+.impeccable/
+*.prof
+
+# machine-local tool config (absolute paths, per-developer)
+.mcp.json
+.claude/

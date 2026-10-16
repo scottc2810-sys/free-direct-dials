@@ -1,0 +1,33 @@
+{{define "main"}}
+<article class="wrap prose">
+  <h1>Privacy Policy</h1>
+  <p class="note">Plain-language summary first; details below. This policy covers markemindai.com/free-direct-dials ("the directory"), run by {{if .Site.LegalName}}{{.Site.LegalName}}{{else}}MarkeMind AI{{end}}{{if .Site.Address}}, {{.Site.Address}}{{end}}.</p>
+
+  <h2>Two kinds of personal data</h2>
+  <p><b>Directory contacts.</b> The directory lists professional contact details of people in their work capacity: name, job title, employer, work location, business email and phone. We process this on the basis of legitimate interest in enabling business-to-business communication. Anyone listed can delete their record at any time on the <a href="{{base}}/remove">removal page</a>; deleted records are blocked from future uploads.</p>
+  <p><b>Visitors who sign in.</b> When you unlock contacts we store your email address, when you signed up and last visited, which contacts you unlocked and when, and how many sponsor breaks you used each day. We use this to run your account, enforce fair-use limits and prevent abuse.</p>
+
+  <h2>Emails we send</h2>
+  <p>We email you a one-time sign-in code when you ask for one. If you agreed when signing up, we also email you when new contacts are added. Every such email has a one-click unsubscribe link. We never sell or rent your email address.</p>
+
+  <h2>Cookies and ads</h2>
+  <p>A strictly necessary cookie keeps you signed in. The directory is funded by advertising: our sponsors' ad networks may set their own cookies to measure and personalise ads. Where the law requires consent, ads load only after you accept them, and you can decline non-essential cookies at any time.</p>
+
+  <h2>Who processes data for us</h2>
+  <ul>
+    <li>Cloudflare (hosting edge, security and bot checks)</li>
+    <li>Our email delivery provider (sending sign-in codes and notifications)</li>
+    <li>Advertising partners (ads and sponsor links)</li>
+  </ul>
+
+  <h2>Retention</h2>
+  <p>Sign-in codes expire after 10 minutes. Sessions last up to 30 days. Accounts that unsubscribe and stay inactive for 24 months are deleted. Server logs are kept for up to a few weeks. Backups roll over within days.</p>
+
+  <h2>Your rights</h2>
+  <p>You can ask to access, correct or delete your data, object to processing, or complain to your data protection authority. Directory contacts can self-delete on the <a href="{{base}}/remove">removal page</a>. For anything else{{if .Site.ContactEmail}}, email <a href="mailto:{{.Site.ContactEmail}}">{{.Site.ContactEmail}}</a>{{else}}, use the contact details on the main site{{end}}. We answer within 30 days.</p>
+
+  <h2>Changes</h2>
+  <p>We will update this page when our practices change and note the date below.</p>
+  <p class="note">Last updated: {{year}}. This text is a starting template and should be reviewed by counsel for each market you operate in.</p>
+</article>
+{{end}}

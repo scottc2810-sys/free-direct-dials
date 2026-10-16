@@ -1,0 +1,43 @@
+{{define "main"}}
+<div class="wrap">
+  <nav class="crumbs" aria-label="Breadcrumb">{{range $i, $c := .Crumbs}}{{if $i}} / {{end}}<a href="{{$c.URL}}">{{$c.Name}}</a>{{end}}</nav>
+  <section class="thesis" aria-labelledby="h1">
+    <div>
+      <h1 id="h1">{{.H1}}</h1>
+      <p class="lead">{{.Lead}}</p>
+      <p style="margin-top:18px"><a class="btn btn-primary btn-big" href="{{.ToolURL}}">Filter these {{num .Count}} contacts</a></p>
+    </div>
+    <ol class="steps">
+      <li><span><b>Search free</b>, no account needed.</span></li>
+      <li><span><b>Confirm your email</b> once.</span></li>
+      <li><span><b>Unlock {{.ContactsAd}}</b> real contacts per sponsor break.</span></li>
+    </ol>
+  </section>
+  <div class="slot" data-slot="top"></div>
+  <h2 style="margin:8px 0 12px">A sample from this list</h2>
+  <div class="table-wrap">
+    <table class="cs">
+      <thead><tr><th class="ln"><span class="sr">Line</span></th><th>Name &amp; title</th><th>Company</th><th>Location</th><th>Email</th><th>Direct dial</th></tr></thead>
+      <tbody>
+      {{range $i, $r := .Rows}}<tr>
+        <td class="ln">{{inc $i}}</td>
+        <td class="who" data-k="Name">{{$r.Name}}<small>{{$r.Title}}</small></td>
+        <td class="co" data-k="Company">{{$r.Company}}<small>{{$r.Industry}}</small></td>
+        <td data-k="Location">{{$r.City}}{{if and $r.City $r.Country}}, {{end}}{{$r.Country}}</td>
+        <td class="data" data-k="Email">{{if $r.Email}}<span class="redact"></span><span class="sr">hidden until unlocked</span>{{else}}<span class="muted">none</span>{{end}}</td>
+        <td class="data" data-k="Phone">{{if $r.Phone}}<span class="redact"></span><span class="sr">hidden until unlocked</span>{{else}}<span class="muted">none</span>{{end}}</td>
+      </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="note" style="margin-top:10px">Emails and direct dials are hidden until unlocked. <a href="{{.ToolURL}}">Open this list in the directory</a> to unlock them free.</p>
+  <p class="note" style="margin-top:6px" data-place="seo_pages"></p>
+  {{if .Related}}
+  <section class="sec" aria-labelledby="rel-h">
+    <div class="sec-head"><h2 id="rel-h">Related lists</h2></div>
+    <ul class="related">{{range .Related}}<li><a href="{{.URL}}">{{.Label}}</a><span class="n">{{num .Count}}</span></li>{{end}}</ul>
+  </section>
+  {{end}}
+  <div class="slot" data-slot="footer"></div>
+</div>
+{{end}}

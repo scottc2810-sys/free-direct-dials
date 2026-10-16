@@ -1,0 +1,4 @@
+# keep Unix line endings everywhere (deploy scripts run on Linux)
+* text=auto eol=lf
+*.xlsx binary
+*.png binary

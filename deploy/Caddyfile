@@ -1,0 +1,61 @@
+# /etc/caddy/Caddyfile: Free Direct Dials origin behind Cloudflare.
+# Values in {$...} come from /etc/caddy/caddy.env (written by provision.sh):
+#   CLOUDFLARE_IPS      space-separated Cloudflare ranges (refreshed weekly)
+#   ADMIN_PATH          same secret path as /etc/dials/dials.env
+#   ADMIN_ALLOW_CADDY   space-separated admin IPs/CIDRs (same list as ADMIN_ALLOW_CIDRS)
+{
+	servers {
+		# Only Cloudflare may tell us the visitor's IP; anything else is ignored.
+		trusted_proxies static {$CLOUDFLARE_IPS}
+		client_ip_headers CF-Connecting-IP
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+	}
+	# Certificates come from Cloudflare Origin CA (the domain's main site is hosted elsewhere,
+	# so ACME cannot validate here).
+	auto_https disable_certs
+}
+
+markemindai.com, origin-dials.markemindai.com {
+	tls /etc/caddy/origin.pem /etc/caddy/origin-key.pem
+	encode zstd gzip
+
+	# Layer 2 of the superadmin IP allow-list (layer 1 is Cloudflare WAF, layer 3 the app).
+	@adminDenied {
+		path /free-direct-dials/{$ADMIN_PATH} /free-direct-dials/{$ADMIN_PATH}/*
+		not client_ip {$ADMIN_ALLOW_CADDY}
+	}
+	respond @adminDenied 404
+
+	@dials path /free-direct-dials /free-direct-dials/* /free-direct-dails /free-direct-dails/*
+	handle @dials {
+		request_body {
+			max_size 20MB # admin upload chunks are 8 MB; visitor JSON is capped far lower in the app
+		}
+		reverse_proxy 127.0.0.1:8081 {
+			header_up X-Real-IP {client_ip}
+			# restarts/deploys are invisible: requests wait up to 5 s for the app to come back
+			lb_try_duration 5s
+			lb_try_interval 250ms
+			transport http {
+				read_timeout 130s
+				write_timeout 130s
+			}
+		}
+	}
+
+	# Everything else belongs to the main site, which isn't on this server.
+	handle {
+		respond "Not found" 404
+	}
+
+	log {
+		output file /var/log/caddy/dials-access.log {
+			roll_size 50MiB
+			roll_keep 3
+		}
+		format json
+	}
+}
