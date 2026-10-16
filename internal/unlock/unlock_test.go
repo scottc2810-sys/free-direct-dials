@@ -16,8 +16,8 @@ import (
 	"markemind/dials/internal/filter"
 	"markemind/dials/internal/importer"
 	"markemind/dials/internal/platform"
-	"markemind/dials/internal/search"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 )
 
 type env struct {
@@ -40,7 +40,7 @@ func newEnv(t *testing.T, rows int) env {
 	for i := 1; i <= 3; i++ {
 		d.W.Exec(`INSERT INTO users(id, email, created, last_seen, unsub_token) VALUES(?,?,0,0,?)`, i, string(rune('a'+i))+"@x.com", "tok"+string(rune('a'+i))+"0123456789abcdef")
 	}
-	return env{svc: &Service{DB: d, Search: search.New(d, search.NewLRU(1<<20, nil), 4), Settings: st, Clock: clk}, clk: clk}
+	return env{svc: &Service{DB: d, Fed: store.NewLocal(d), Settings: st, Clock: clk}, clk: clk}
 }
 
 func f(t *testing.T, raw string) filter.Filter {
@@ -145,7 +145,7 @@ func TestAcceptance7FilterChangeNeverReissues(t *testing.T) {
 		got[r.ID] = true
 	}
 	// a broader filter that includes the already-unlocked USA rows
-	v, err := e.svc.View(ctx, 1, f(t, "industry=software"), false)
+	v, err := e.svc.View(ctx, 1, f(t, "industry=software"), false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +163,11 @@ func TestAcceptance7FilterChangeNeverReissues(t *testing.T) {
 	if second.Batch != 2 {
 		t.Fatalf("batch = %d", second.Batch)
 	}
-	all, _ := e.svc.View(ctx, 1, f(t, ""), false)
+	all, _ := e.svc.View(ctx, 1, f(t, ""), false, "")
 	if all.Unlocked != 20 || len(all.Rows) != 20 || all.Rows[0].Batch != 2 || !all.Rows[0].New || all.Rows[19].New {
 		t.Fatalf("view: unlocked=%d rows=%d first=%+v", all.Unlocked, len(all.Rows), all.Rows[0])
 	}
-	newest, _ := e.svc.View(ctx, 1, f(t, ""), true)
+	newest, _ := e.svc.View(ctx, 1, f(t, ""), true, "")
 	if len(newest.Rows) != 10 {
 		t.Fatalf("only-newest view = %d rows", len(newest.Rows))
 	}
@@ -200,7 +200,7 @@ func TestNothingLeftKeepsToken(t *testing.T) {
 func TestDailyCaps(t *testing.T) {
 	e := newEnv(t, 300)
 	ctx := context.Background()
-	e.svc.Settings.Save(ctx, "limits", []byte(`{"contacts_per_ad":5,"max_ads_per_day":2,"max_ads_per_day_ip":3,"view_cap":500,"signups_enabled":true}`), "t")
+	e.svc.Settings.Save(ctx, "limits", []byte(`{"contacts_per_ad":5,"max_ads_per_day":2,"max_ads_per_day_ip":3,"page_size":50,"preview_pages":5,"signups_enabled":true}`), "t")
 	for i := 0; i < 2; i++ {
 		tok := e.watch(t, 1)
 		e.clk.Advance(10 * time.Second)
@@ -257,5 +257,47 @@ func TestExportFormulaSafe(t *testing.T) {
 	}
 	if SafeCell("+1 555") != "'+1 555" || SafeCell("ok") != "ok" {
 		t.Fatal("SafeCell")
+	}
+}
+
+func TestViewPagesThroughEverything(t *testing.T) {
+	e := newEnv(t, 300)
+	ctx := context.Background()
+	e.svc.Settings.Save(ctx, "limits", []byte(`{"contacts_per_ad":10,"max_ads_per_day":50,"max_ads_per_day_ip":150,"page_size":12,"preview_pages":5,"signups_enabled":true}`), "t")
+	for i := 0; i < 4; i++ {
+		tok := e.watch(t, 1)
+		e.clk.Advance(10 * time.Second)
+		if _, err := e.svc.Claim(ctx, 1, tok, f(t, ""), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[int64]bool{}
+	cur, pages := "", 0
+	lastBatch := int64(1 << 60)
+	for {
+		v, err := e.svc.View(ctx, 1, f(t, ""), false, cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if v.Unlocked != 40 || v.PageSize != 12 {
+			t.Fatalf("unlocked=%d page=%d", v.Unlocked, v.PageSize)
+		}
+		for _, r := range v.Rows {
+			if seen[r.ID] {
+				t.Fatalf("row %d on two pages", r.ID)
+			}
+			if r.Batch > lastBatch {
+				t.Fatalf("pages out of order: batch %d after %d", r.Batch, lastBatch)
+			}
+			seen[r.ID], lastBatch = true, r.Batch
+		}
+		if v.Next == "" {
+			break
+		}
+		cur = v.Next
+	}
+	if len(seen) != 40 || pages != 4 {
+		t.Fatalf("paged %d rows in %d pages, want 40 in 4", len(seen), pages)
 	}
 }

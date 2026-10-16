@@ -172,21 +172,21 @@ func render(h *template.Template, t *texttemplate.Template, data any) (string, s
 	return hb.String(), tb.String()
 }
 
-const layoutHead = `<!doctype html><html><body style="margin:0;background:#f4f2ec;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1c1b17">
+const layoutHead = `<!doctype html><html><body style="margin:0;background:#f1f3f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#12141b">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 12px">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #e3dfd3;border-radius:8px">
-<tr><td style="padding:24px 28px 8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#0e6b52;font-weight:700">Free Direct Dials</td></tr>`
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #d7dce8;border-radius:8px">
+<tr><td style="padding:24px 28px 8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#2a4fd6;font-weight:700">Free Direct Dials</td></tr>`
 
-const layoutFoot = `<tr><td style="padding:16px 28px 24px;border-top:1px solid #eeeae0;font-size:12px;line-height:1.6;color:#6b675c">
-{{with .F}}{{if .DonateURL}}This directory is free and funded by readers. <a href="{{.DonateURL}}" style="color:#0e6b52">Chip in via UPI, PayPal or crypto</a>.<br>{{end}}
+const layoutFoot = `<tr><td style="padding:16px 28px 24px;border-top:1px solid #e6e9f2;font-size:12px;line-height:1.6;color:#5d6477">
+{{with .F}}{{if .DonateURL}}This directory is free and funded by readers. <a href="{{.DonateURL}}" style="color:#2a4fd6">Chip in via UPI, PayPal or crypto</a>.<br>{{end}}
 {{if .LegalName}}{{.LegalName}}{{end}}{{if .Address}} &middot; {{.Address}}{{end}}{{end}}
-{{if .Unsub}}<br><a href="{{.Unsub}}" style="color:#6b675c">Unsubscribe</a> from new-data emails.{{end}}
+{{if .Unsub}}<br><a href="{{.Unsub}}" style="color:#5d6477">Unsubscribe</a> from new-data emails.{{end}}
 </td></tr></table></td></tr></table></body></html>`
 
 var otpHTML = template.Must(template.New("otp").Parse(layoutHead + `
 <tr><td style="padding:8px 28px 20px;font-size:16px;line-height:1.5">
 {{if eq .Purpose "remove"}}Use this code to confirm that you want your contact details removed from the directory:{{else}}Use this code to sign in and unlock contacts:{{end}}
-<div style="margin:18px 0;font:700 32px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.3em;color:#1c1b17">{{.Code}}</div>
+<div style="margin:18px 0;font:700 32px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.3em;color:#12141b">{{.Code}}</div>
 It expires in 10 minutes. If you didn't ask for it, you can ignore this email.</td></tr>` + layoutFoot))
 
 var otpText = texttemplate.Must(texttemplate.New("otp").Parse(`Your code: {{.Code}}
@@ -203,8 +203,8 @@ var alertText = texttemplate.Must(texttemplate.New("alert").Parse("{{.Subject}}\
 
 var campaignHTML = template.Must(template.New("campaign").Parse(layoutHead + `
 <tr><td style="padding:8px 28px 8px;font-size:22px;line-height:1.3;font-weight:700">{{.Headline}}</td></tr>
-<tr><td style="padding:4px 28px 20px;font-size:16px;line-height:1.55;color:#3a372f">{{.Intro}}</td></tr>
-<tr><td style="padding:0 28px 28px"><a href="{{.CTA}}" style="display:inline-block;background:#0e6b52;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 20px;border-radius:6px">Browse the new contacts</a></td></tr>` + layoutFoot))
+<tr><td style="padding:4px 28px 20px;font-size:16px;line-height:1.55;color:#393e4c">{{.Intro}}</td></tr>
+<tr><td style="padding:0 28px 28px"><a href="{{.CTA}}" style="display:inline-block;background:#2a4fd6;color:#ffffff;text-decoration:none;font-weight:700;padding:12px 20px;border-radius:6px">Browse the new contacts</a></td></tr>` + layoutFoot))
 
 var campaignText = texttemplate.Must(texttemplate.New("campaign").Parse(`{{.Headline}}
 

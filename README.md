@@ -1,8 +1,8 @@
 # Free Direct Dials
 
-A free B2B contact directory at `markemindai.com/free-direct-dials`. Visitors filter about a million contacts by country, industry, seniority, technology and more. After confirming a real email and a short sponsor break, each break unlocks **10 contacts they have never seen**. Revenue comes from Adsterra (sponsor break, Smart Link placements, banner slots) and donations (UPI, PayPal, crypto). Custom and bulk data requests go to WhatsApp.
+A free B2B contact directory at `markemindai.com/free-direct-dials`. Visitors filter about a million contacts by country, industry, seniority, technology and more. After confirming a real email and a short sponsor break (or a Google rewarded video), each break unlocks **10 contacts they have never seen**, shown the moment the ad ends. Anyone can browse 5 pages of masked rows; pages 2–5 each open after a short sponsor break. Revenue comes from Adsterra (sponsor break, Smart Link placements, banner slots), Google Ad Manager rewarded video, labelled partner (affiliate) offers and donations (UPI, PayPal, crypto). Custom and bulk data requests go to WhatsApp (+91 98343 46179).
 
-One Go binary + SQLite + Caddy, behind Cloudflare, sized for a **0.75 GB RAM / 20 GB disk** VPS.
+One Go binary + SQLite + Caddy, behind Cloudflare, sized for a **0.75 GB RAM / 20 GB disk** VPS. Contacts can also be spread over **Supabase / Postgres databases** added in Superadmin → Databases; the VPS database is searched first and the others only when needed.
 
 | Doc | What's in it |
 |---|---|
@@ -12,6 +12,7 @@ One Go binary + SQLite + Caddy, behind Cloudflare, sized for a **0.75 GB RAM / 2
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | measured numbers at 1 M contacts and tuning notes |
 | [docs/REVIEW.md](docs/REVIEW.md) | senior review findings and their resolution |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | product and design brief |
+| [docs/MONETIZATION.md](docs/MONETIZATION.md) | which ad networks and affiliates, how to sign up, ads.txt, how to earn more |
 
 ## Run locally (Windows, macOS, Linux)
 
@@ -30,11 +31,14 @@ In dev, sign-in codes print to the console (`DEV sign-in code`), Turnstile is of
 go vet ./... && go test ./... -count=1
 go test ./internal/filter/ -run XXX -fuzz FuzzCanonicalRoundTrip -fuzztime 60s
 DIALS_SAMPLE_XLSX=/path/to/vendor-export.xlsx go test ./internal/importer/ -run TestRealSampleIfPresent -v
+# Postgres store against a THROWAWAY Supabase project (drops schema fdd there):
+# put DIALS_TEST_PG_DSN=postgresql://... in data/test-supabase.env, then
+go test ./internal/store/ -run Postgres -v
 ```
 
 ## CLI
 
-`serve` · `migrate` · `admin create <user>` · `import <file> [-sheet N]` · `inspect <file>` · `gen <rows> <out.csv>` · `backup` · `restore <src> <dst>` · `seo` · `blocklist <file>` · `bench [-plans]` · `check` · `version`
+`serve` · `migrate` · `admin create <user>` · `import <file> [-sheet N] [-target auto|ID]` · `stores` · `inspect <file>` · `gen <rows> <out.csv>` · `backup` · `restore <src> <dst>` · `seo` · `blocklist <file>` · `bench [-plans]` · `check` · `version`
 
 ## Deploy
 

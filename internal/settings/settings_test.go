@@ -75,7 +75,7 @@ func TestRejectsBadInput(t *testing.T) {
 		"donations": `{"enabled":true,"wallets":[{"kind":"evm","address":"0x5AAeb6053F3E94C9b9A09f33669435E7Ef1BeAed","networks":["ethereum"],"enabled":true}]}`,
 		"whatsapp":  `{"enabled":true,"number":"12","message":"hi","label":"x"}`,
 		"ads":       `{"mode":"popunder","smartlink":"","min_seconds":10,"adblock":"nudge","slots":{}}`,
-		"limits":    `{"contacts_per_ad":500,"max_ads_per_day":50,"max_ads_per_day_ip":150,"view_cap":500,"signups_enabled":true}`,
+		"limits":    `{"contacts_per_ad":500,"max_ads_per_day":50,"max_ads_per_day_ip":150,"page_size":50,"preview_pages":5,"signups_enabled":true}`,
 		"site":      `{"consent_mode":"all","unknown_field":1}`,
 	}
 	for sec, body := range bad {

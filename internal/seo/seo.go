@@ -1,102 +1,82 @@
 // Package seo selects the landing pages worth indexing (country, industry and
 // country × industry with real counts) and tracks pages that should 410.
+// Pages are keyed by normalised values, which are the same in every store.
 package seo
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
 	"sort"
-	"strconv"
 
 	"markemind/dials/internal/db"
 	"markemind/dials/internal/normalize"
 	"markemind/dials/internal/platform"
+	"markemind/dials/internal/store"
 )
 
 type Page struct {
 	Slug     string `json:"slug"`
-	Kind     string `json:"kind"` // country | industry | combo
-	Country  int64  `json:"country"`
-	Industry int64  `json:"industry"`
+	Kind     string `json:"kind"`     // country | industry | combo
+	Country  string `json:"country"`  // value_n ("" if none)
+	Industry string `json:"industry"` // value_n
 	Count    int64  `json:"count"`
 	Updated  int64  `json:"updated"`
 	Gone     bool   `json:"gone"`
 }
 
+// Source provides merged counts across every contact store.
+type Source interface {
+	TopValues(ctx context.Context, dim string, minCount, limit int) ([]store.FacetCount, error)
+	TopCombos(ctx context.Context, minCount, limit int) ([]store.Combo, error)
+}
+
 // Refresh recomputes the indexable page set: the top `top` candidates with at
 // least minCount contacts. Pages that drop out are kept as gone (HTTP 410)
 // for 90 days so crawlers de-index them quickly.
-func Refresh(ctx context.Context, d *db.DB, clk platform.Clock, top, minCount int) (int, error) {
+func Refresh(ctx context.Context, d *db.DB, src Source, clk platform.Clock, top, minCount int) (int, error) {
 	now := clk.Now().Unix()
-	labels := map[int64]string{}
 	var cands []Page
-	for _, dim := range []struct {
-		id   int
-		kind string
-	}{{1, "country"}, {4, "industry"}} {
-		// slugs come from value_n (stable), never from the display label, which can
-		// change when the most common spelling shifts after an import.
-		rows, err := d.R.QueryContext(ctx, `SELECT id, value_n, cnt FROM dims WHERE dim=? AND id>12 AND cnt>=? ORDER BY cnt DESC LIMIT ?`,
-			dim.id, minCount, top)
+	for _, kind := range []string{"country", "industry"} {
+		vals, err := src.TopValues(ctx, kind, minCount, top)
 		if err != nil {
 			return 0, err
 		}
-		for rows.Next() {
-			var id, n int64
-			var label string
-			if err := rows.Scan(&id, &label, &n); err != nil {
-				rows.Close()
-				return 0, err
-			}
-			labels[id] = label
-			p := Page{Kind: dim.kind, Count: n}
-			if dim.kind == "country" {
-				p.Country = id
+		for _, v := range vals {
+			p := Page{Kind: kind, Count: v.Count}
+			if kind == "country" {
+				p.Country = v.Value
 			} else {
-				p.Industry = id
+				p.Industry = v.Value
 			}
 			cands = append(cands, p)
 		}
-		rows.Close()
 	}
-	rows, err := d.R.QueryContext(ctx, `SELECT country, industry, COUNT(*) AS n FROM contacts WHERE country>12 AND industry>12
-		GROUP BY country, industry HAVING n>=? ORDER BY n DESC LIMIT ?`, minCount, top)
+	combos, err := src.TopCombos(ctx, minCount, top)
 	if err != nil {
 		return 0, err
 	}
-	for rows.Next() {
-		p := Page{Kind: "combo"}
-		if err := rows.Scan(&p.Country, &p.Industry, &p.Count); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		cands = append(cands, p)
+	for _, c := range combos {
+		cands = append(cands, Page{Kind: "combo", Country: c.Country, Industry: c.Industry, Count: c.Count})
 	}
-	rows.Close()
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Count > cands[j].Count })
 	if len(cands) > top {
 		cands = cands[:top]
 	}
-
-	label := func(id int64) string {
-		if l, ok := labels[id]; ok {
-			return l
-		}
-		var l string
-		d.R.QueryRowContext(ctx, `SELECT value_n FROM dims WHERE id=?`, id).Scan(&l)
-		labels[id] = l
-		return l
-	}
-	owner := map[string]int64{} // "country/india" → dim id: resolves slug collisions
-	slugFor := func(kind string, id int64) string {
-		s := normalize.Slug(label(id))
+	// slugs come from value_n (stable), never from the display label, which can
+	// change when the most common spelling shifts after an import
+	owner := map[string]string{} // "country/india" → value_n: resolves slug collisions
+	slugFor := func(kind, value string) string {
+		s := normalize.Slug(value)
 		if s == "" {
-			s = "x" + strconv.FormatInt(id, 10)
+			s = "x"
 		}
-		if o, ok := owner[kind+"/"+s]; ok && o != id {
-			s += "-" + strconv.FormatInt(id, 10)
+		if o, ok := owner[kind+"/"+s]; ok && o != value {
+			h := sha1.Sum([]byte(value))
+			s += "-" + hex.EncodeToString(h[:3])
 		}
-		owner[kind+"/"+s] = id
+		owner[kind+"/"+s] = value
 		return s
 	}
 	err = d.Tx(ctx, func(tx *sql.Tx) error {
@@ -112,9 +92,11 @@ func Refresh(ctx context.Context, d *db.DB, clk platform.Clock, top, minCount in
 			default:
 				p.Slug = "country/" + slugFor("country", p.Country) + "/" + slugFor("industry", p.Industry)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO seo_pages(slug, kind, country, industry, cnt, updated, gone) VALUES(?,?,?,?,?,?,0)
-				ON CONFLICT(slug) DO UPDATE SET kind=excluded.kind, country=excluded.country, industry=excluded.industry,
-				cnt=excluded.cnt, updated=excluded.updated, gone=0`, p.Slug, p.Kind, p.Country, p.Industry, p.Count, now); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO seo_pages(slug, kind, country, industry, country_v, industry_v, cnt, updated, gone)
+				VALUES(?,?,0,0,?,?,?,?,0)
+				ON CONFLICT(slug) DO UPDATE SET kind=excluded.kind, country=0, industry=0, country_v=excluded.country_v,
+				industry_v=excluded.industry_v, cnt=excluded.cnt, updated=excluded.updated, gone=0`,
+				p.Slug, p.Kind, p.Country, p.Industry, p.Count, now); err != nil {
 				return err
 			}
 		}
@@ -128,26 +110,26 @@ func Refresh(ctx context.Context, d *db.DB, clk platform.Clock, top, minCount in
 func Lookup(ctx context.Context, q db.Querier, slug string) (Page, bool) {
 	var p Page
 	var gone int
-	err := q.QueryRowContext(ctx, `SELECT slug, kind, country, industry, cnt, updated, gone FROM seo_pages WHERE slug=?`, slug).
+	err := q.QueryRowContext(ctx, `SELECT slug, kind, country_v, industry_v, cnt, updated, gone FROM seo_pages WHERE slug=?`, slug).
 		Scan(&p.Slug, &p.Kind, &p.Country, &p.Industry, &p.Count, &p.Updated, &gone)
 	p.Gone = gone == 1
 	return p, err == nil
 }
 
 // List returns live pages (optionally narrowed) ordered by size.
-func List(ctx context.Context, q db.Querier, kind string, country, industry int64, limit int) ([]Page, error) {
-	query := `SELECT slug, kind, country, industry, cnt, updated FROM seo_pages WHERE gone=0`
+func List(ctx context.Context, q db.Querier, kind, country, industry string, limit int) ([]Page, error) {
+	query := `SELECT slug, kind, country_v, industry_v, cnt, updated FROM seo_pages WHERE gone=0`
 	var args []any
 	if kind != "" {
 		query += ` AND kind=?`
 		args = append(args, kind)
 	}
-	if country > 0 {
-		query += ` AND country=?`
+	if country != "" {
+		query += ` AND country_v=?`
 		args = append(args, country)
 	}
-	if industry > 0 {
-		query += ` AND industry=?`
+	if industry != "" {
+		query += ` AND industry_v=?`
 		args = append(args, industry)
 	}
 	query += ` ORDER BY cnt DESC LIMIT ?`

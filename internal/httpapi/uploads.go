@@ -185,7 +185,7 @@ func (m *ImportManager) Running() bool {
 }
 
 // Start launches the import of a completed upload and returns the uploads row id.
-func (m *ImportManager) Start(uploadID string, sheet int, mapping importer.Mapping, by string) (int64, error) {
+func (m *ImportManager) Start(uploadID string, sheet int, mapping importer.Mapping, by string, target int) (int64, error) {
 	a := m.app
 	if err := a.Guard.AllowHeavy(); err != nil {
 		return 0, err
@@ -212,11 +212,11 @@ func (m *ImportManager) Start(uploadID string, sheet int, mapping importer.Mappi
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &importJob{id: id, cancel: cancel}
 	m.cur = job
-	go m.run(ctx, job, uploadID, path, sheet, mapping, by)
+	go m.run(ctx, job, uploadID, path, sheet, mapping, by, target)
 	return id, nil
 }
 
-func (m *ImportManager) run(ctx context.Context, job *importJob, uploadID, path string, sheet int, mapping importer.Mapping, by string) {
+func (m *ImportManager) run(ctx context.Context, job *importJob, uploadID, path string, sheet int, mapping importer.Mapping, by string, target int) {
 	a := m.app
 	defer func() {
 		job.cancel()
@@ -226,11 +226,18 @@ func (m *ImportManager) run(ctx context.Context, job *importJob, uploadID, path 
 	}()
 	status, errMsg := "done", ""
 	var st importer.Stats
+	router := a.Store.ImportTarget(target)
 	src, err := importer.OpenSource(path, a.Cfg.TmpDir, sheet) // CSV, TSV, gzip or .xlsx
 	if err == nil {
 		st, err = a.Importer.Run(ctx, src, importer.Options{Mapping: mapping, CanWrite: a.Guard.AllowHeavy, Clock: a.Clock,
-			Progress: func(s importer.Stats) { job.stats.Store(&s) }})
+			Target: router, Progress: func(s importer.Stats) { job.stats.Store(&s) }})
 		src.Close()
+	}
+	var where []string // which databases took rows, for the upload record
+	for _, mb := range a.Store.Members() {
+		if n := router.Written[mb.ID]; n > 0 {
+			where = append(where, fmt.Sprintf("%s: %d", mb.Name, n))
+		}
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -238,13 +245,10 @@ func (m *ImportManager) run(ctx context.Context, job *importJob, uploadID, path 
 	case err != nil:
 		status, errMsg = "failed", err.Error()
 	}
-	if status != "done" {
-		// partial batches were committed: still refresh counts/caches so the site is consistent
-		importer.Refresh(context.Background(), a.DB)
-	}
+	// a failed run's committed batches were already settled by the router (Abort)
 	reasons, _ := json.Marshal(map[string]any{"skipped": st.Reasons, "cleaned": st.Cleaned, "sniffed": st.Sniffed})
-	a.DB.W.Exec(`UPDATE uploads SET rows=?, added=?, updated=?, unchanged=?, skipped=?, skip_reasons=?, status=?, error=?, finished=? WHERE id=?`,
-		st.Rows, st.Added, st.Updated, st.Unchanged, st.Skipped, string(reasons), status, errMsg, a.Clock.Now().Unix(), job.id)
+	a.DB.W.Exec(`UPDATE uploads SET rows=?, added=?, updated=?, unchanged=?, skipped=?, skip_reasons=?, status=?, error=?, finished=?, target=? WHERE id=?`,
+		st.Rows, st.Added, st.Updated, st.Unchanged, st.Skipped, string(reasons), status, errMsg, a.Clock.Now().Unix(), strings.Join(where, ", "), job.id)
 	a.audit(context.Background(), by, "", "import."+status, fmt.Sprintf("upload #%d rows=%d added=%d updated=%d skipped=%d %s",
 		job.id, st.Rows, st.Added, st.Updated, st.Skipped, errMsg))
 	a.Uploads.Remove(uploadID) // the spec: delete the file when done

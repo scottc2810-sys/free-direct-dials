@@ -56,6 +56,21 @@ Database at 1 M synthetic contacts: **664 MB**, so the 20 GB disk plan has room 
 2. **City facet with two other filters (352 ms).** Group-by on a column outside the composite. Fix: a `(country, industry, city)` covering index, but only if analytics show visitors opening City after choosing country + industry (costs ~14 MB per million rows).
 3. **Claim p95 51 ms.** The target was 50 ms. Claims are rate-limited by the sponsor break (≥ 10 s each), so this has no user-visible impact.
 
+## Several databases (Supabase / Postgres stores)
+
+Remote stores are designed so that most requests never touch them:
+
+| Request | Remote calls |
+|---|---|
+| Totals, single-filter counts, a dropdown with no other filter, headline stats, SEO labels | **0** (local mirror of per-value counts) |
+| Any filter whose values a store doesn't have (e.g. a country it holds nobody from) | **0** for that store (pruned) |
+| Preview page 1 when the VPS database has 10 matches | **0** |
+| A two-condition count or dropdown | 1 per store that can match, then **0** for the same question until that store's data changes (memo) |
+| A page beyond the VPS database's matches | that store's count and rows, searched in the background; the next page is prefetched |
+| Signed-in "my contacts" page | only the stores that hold the user's unlocks, newest first |
+
+Postgres batches are set-based: about six round trips per 5,000-row import batch (dictionary upsert, spelling counts, one identity lookup, bulk update, id allocation, bulk insert). Postgres timings depend on the Supabase region and plan; measure with the integration test once a test project is connected.
+
 ## Memory and I/O settings (production)
 
 `GOMEMLIMIT=150MiB`, `GOGC=50`, systemd `MemoryHigh=350M` / `MemoryMax=450M`. SQLite: WAL, `synchronous=NORMAL`, writer cache 32 MB (128 MB during imports only), 4 readers × 16 MB, 128 MB shared mmap, `temp_store=MEMORY`, `journal_size_limit=64 MB`, `secure_delete=FAST`, incremental auto-vacuum.

@@ -23,6 +23,7 @@ import (
 	"markemind/dials/internal/platform"
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 	"markemind/dials/internal/unlock"
 )
 
@@ -56,11 +57,15 @@ func newTestApp(t *testing.T, extraEnv map[string]string) *testApp {
 	st.Load(context.Background())
 	lp := &mail.LogProvider{}
 	mailer := &mail.Mailer{DB: d, Clock: clk, Log: log, From: mail.Address{Email: "no-reply@x.com"}, Routes: []mail.Route{{P: lp, Cap: 1000}}, ReservePct: 30}
-	srch := search.New(d, search.NewLRU(1<<20, nil), 4)
+	fed := &store.Federation{Control: d, Clock: clk, Log: log, Key: store.KeyFrom([]byte("s")), DataDir: cfg.DataDir, Cache: search.NewLRU(1<<20, nil)}
+	if err := fed.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(fed.Close)
 	guard := &jobs.Guard{Path: ".", Stat: func(string) (platform.DiskStat, error) { return platform.DiskStat{Total: 100, Free: 90}, nil }}
 	guard.Check()
-	a := &App{Cfg: cfg, DB: d, Log: log, Clock: clk, Search: srch, Settings: st,
-		Unlock: &unlock.Service{DB: d, Search: srch, Settings: st, Clock: clk}, Users: &auth.Users{DB: d, Clock: clk},
+	a := &App{Cfg: cfg, DB: d, Log: log, Clock: clk, Store: fed, Settings: st,
+		Unlock: &unlock.Service{DB: d, Fed: fed, Settings: st, Clock: clk}, Users: &auth.Users{DB: d, Clock: clk},
 		Sessions: &auth.Sessions{DB: d, Clock: clk, TTL: 720 * time.Hour}, OTP: &auth.OTP{DB: d, Clock: clk, Secret: []byte("s"), Sender: mailer},
 		Admins: &auth.Admins{DB: d, Clock: clk, Idle: 30 * time.Minute, Absolute: 12 * time.Hour}, Turnstile: &auth.Turnstile{},
 		Checker: &emailcheck.Checker{DB: d, Disposable: disp, Clock: clk, Log: log}, Disposable: disp, Mailer: mailer,

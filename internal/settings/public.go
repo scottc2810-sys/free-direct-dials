@@ -9,16 +9,23 @@ import (
 // Public is the visitor-facing projection of settings (no internal fields).
 type Public struct {
 	Ads struct {
-		Mode       string                `json:"mode"`
-		SmartLink  string                `json:"smartlink"`
-		MinSeconds int                   `json:"min_seconds"`
-		Adblock    string                `json:"adblock"`
-		ProbeURL   string                `json:"probe_url,omitempty"`
-		Slots      map[string]PublicSlot `json:"slots"`
-		Placements map[string]bool       `json:"placements"`
-		Label      string                `json:"label"`
-		CTA        string                `json:"cta"`
+		Mode           string                `json:"mode"`
+		SmartLink      string                `json:"smartlink"`
+		MinSeconds     int                   `json:"min_seconds"`
+		Adblock        string                `json:"adblock"`
+		ProbeURL       string                `json:"probe_url,omitempty"`
+		Slots          map[string]PublicSlot `json:"slots"`
+		Placements     map[string]bool       `json:"placements"`
+		Label          string                `json:"label"`
+		CTA            string                `json:"cta"`
+		GPTAdUnit      string                `json:"gpt_ad_unit,omitempty"`
+		PreviewGate    bool                  `json:"preview_gate"`
+		PreviewSeconds int                   `json:"preview_seconds"`
 	} `json:"ads"`
+	Affiliates struct {
+		Label string            `json:"label"`
+		Items []PublicAffiliate `json:"items"`
+	} `json:"affiliates"`
 	Donations struct {
 		Enabled bool           `json:"enabled"`
 		Heading string         `json:"heading"`
@@ -32,6 +39,8 @@ type Public struct {
 	Limits   struct {
 		ContactsPerAd int  `json:"contacts_per_ad"`
 		MaxAdsPerDay  int  `json:"max_ads_per_day"`
+		PageSize      int  `json:"page_size"`
+		PreviewPages  int  `json:"preview_pages"`
 		Signups       bool `json:"signups"`
 	} `json:"limits"`
 	Site struct {
@@ -50,6 +59,16 @@ type PublicSlot struct {
 	Isolation  string `json:"isolation"`
 	Height     int    `json:"h"`
 	HeightM    int    `json:"hm"`
+}
+
+type PublicAffiliate struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Text       string   `json:"text"`
+	CTA        string   `json:"cta"`
+	URL        string   `json:"url"`
+	Placements []string `json:"placements"`
+	Weight     int      `json:"weight"`
 }
 
 type PublicUPI struct {
@@ -86,6 +105,20 @@ func BuildPublic(a All) Public {
 	p.Ads.Mode, p.Ads.SmartLink, p.Ads.MinSeconds, p.Ads.Adblock, p.Ads.ProbeURL =
 		a.Ads.Mode, a.Ads.SmartLink, a.Ads.MinSeconds, a.Ads.Adblock, a.Ads.ProbeURL
 	p.Ads.Label, p.Ads.CTA = a.Ads.SponsorLabel, a.Ads.SponsorCTA
+	p.Ads.PreviewGate, p.Ads.PreviewSeconds = a.Ads.PreviewGate, a.Ads.PreviewSeconds
+	if a.Ads.Mode == "gpt_rewarded" {
+		p.Ads.GPTAdUnit = a.Ads.GPTAdUnit
+	}
+	p.Affiliates.Label = a.Affiliates.Label
+	p.Affiliates.Items = []PublicAffiliate{}
+	if a.Affiliates.Enabled {
+		for _, it := range a.Affiliates.Items {
+			if it.Enabled && it.URL != "" && len(it.Placements) > 0 {
+				p.Affiliates.Items = append(p.Affiliates.Items, PublicAffiliate{ID: it.ID, Name: it.Name, Text: it.Text, CTA: it.CTA,
+					URL: it.URL, Placements: it.Placements, Weight: it.Weight})
+			}
+		}
+	}
 	p.Ads.Placements = map[string]bool{}
 	if a.Ads.SmartLink != "" {
 		for k, v := range a.Ads.Placements {
@@ -134,6 +167,7 @@ func BuildPublic(a All) Public {
 			URL: "https://wa.me/" + url.PathEscape(a.WhatsApp.Number)}
 	}
 	p.Limits.ContactsPerAd, p.Limits.MaxAdsPerDay, p.Limits.Signups = a.Limits.ContactsPerAd, a.Limits.MaxAdsPerDay, a.Limits.SignupsEnabled
+	p.Limits.PageSize, p.Limits.PreviewPages = a.Limits.PageSize, a.Limits.PreviewPages
 	p.Site.Announcement, p.Site.ReadOnly, p.Site.ConsentMode = a.Site.Announcement, a.Site.ReadOnly, a.Site.ConsentMode
 	p.Site.SubscribeDefault, p.Site.ContactEmail, p.Site.LegalName = a.Site.SubscribeDefault, a.Site.ContactEmail, a.Site.LegalName
 	return p

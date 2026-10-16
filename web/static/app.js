@@ -52,6 +52,8 @@
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+    sget(k) { try { return sessionStorage.getItem(k); } catch { return null; } },
+    sset(k, v) { try { sessionStorage.setItem(k, v); } catch { /* private mode */ } },
   };
 
   class ApiError extends Error {
@@ -78,7 +80,7 @@
   }
 
   // ---------- config, consent, placements, slots ----------
-  let CFG = { settings: { ads: { slots: {}, placements: {} }, donations: {}, limits: {}, site: {} } };
+  let CFG = { settings: { ads: { slots: {}, placements: {} }, affiliates: { items: [] }, donations: {}, limits: {}, site: {} } };
   const S = () => CFG.settings;
   const signedHint = () => /(?:^|;\s*)fdd_in=1/.test(document.cookie);
 
@@ -141,6 +143,37 @@
     return a;
   }
 
+  // ---------- partner (affiliate) offers: always labelled, rel="sponsored", new tab ----------
+  const affPick = {};
+  function pickAff(place) {
+    if (NO_ADS) return null;
+    if (place in affPick) return affPick[place];
+    const items = ((S().affiliates || {}).items || []).filter(a => (a.placements || []).includes(place));
+    let pick = null;
+    const total = items.reduce((n, a) => n + (a.weight || 1), 0);
+    let r = Math.random() * total;
+    for (const a of items) { r -= a.weight || 1; if (r <= 0) { pick = a; break; } }
+    return (affPick[place] = pick || items[0] || null);
+  }
+  function affCard(place) {
+    const a = pickAff(place); if (!a) return ''; // DOM append() would print "null"
+    const label = (S().affiliates || {}).label || 'Partner offer';
+    if (place === 'footer') return h('a', { class: 'aff-mini', href: a.url, target: '_blank', rel: 'sponsored noopener' }, h('span', { class: 'sponsored' }, label), ' ', a.name, ': ', a.cta);
+    return h('a', { class: 'aff', href: a.url, target: '_blank', rel: 'sponsored noopener' },
+      h('span', { class: 'sponsored' }, label), h('b', {}, a.name), h('p', {}, a.text), h('span', { class: 'btn btn-small' }, a.cta, icon('out')));
+  }
+  function renderAff() {
+    for (const el of $$('[data-aff]')) { el.replaceChildren(); const c = affCard(el.dataset.aff); if (c) el.append(c); }
+  }
+  // the 300×250 sponsor unit used by every break (unlock or next preview page)
+  function sponsorSlot(into) {
+    const sl = (S().ads.slots || {}).sponsor;
+    if (sl && consentOK()) {
+      if (sl.isolation === 'direct') injectHTML(into, sl.html);
+      else into.append(h('iframe', { src: BASE + '/ad-frame?slot=sponsor' + (mq('(max-width: 727px)') ? '&m=1' : ''), title: 'Advertisement', sandbox: 'allow-scripts allow-popups allow-popups-to-escape-sandbox' }));
+    } else if (placed('slot_fallback')) into.append(houseAd(120));
+  }
+
   function renderSlots() {
     if (NO_ADS) return;
     const mobile = mq('(max-width: 727px)');
@@ -184,7 +217,7 @@
     const top = $('#wa-top');
     if (top) {
       top.replaceChildren();
-      if (w) top.append(h('a', { class: 'btn btn-small', href: waURL(summary, count), target: '_blank', rel: 'noopener' }, icon('wa'), w.label || 'Bulk data'));
+      if (w) top.append(h('a', { class: 'btn btn-small btn-wa', href: waURL(summary, count), target: '_blank', rel: 'noopener' }, icon('wa'), w.label || 'Bulk data'));
     }
     const bulk = $('#bulk');
     if (bulk) { bulk.hidden = !w; const a = $('#wa-bulk'); if (a && w) a.href = waURL(summary, count); }
@@ -255,7 +288,10 @@
     sel: Object.fromEntries(DIMS.map(([k]) => [k, new Set()])), labels: {}, kw: '', tech: '', email: false, phone: false,
     open: new Set(['country', 'industry']), me: null, newest: false, seq: 0, fseq: {}, last: null, reveal: new Set(),
     dock: 'idle', token: null, pendingUnlock: false, total: null,
+    mode: 'preview', page: 0, pages: 1, cursors: [], vcur: '', polls: 0, pollT: 0, gateSeq: 0, fpoll: {},
   };
+  const PER = 10; // preview rows per page
+  const pageKey = p => 'fdd_pg|' + qs() + '|' + p;
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel('fdd') : null;
 
   function qs(exclude) {
@@ -277,6 +313,8 @@
     st.email = p.get('email') === '1'; st.phone = p.get('phone') === '1';
     $('#kw').value = st.kw; $('#tech').value = st.tech; $('#has-email').checked = st.email; $('#has-phone').checked = st.phone;
   }
+  // ad overlays (Google rewarded: #goog_rewarded) push their own hash; it is not a filter
+  const foreignHash = () => /^#goog_/.test(location.hash);
   function writeHash() {
     const q = qs();
     history.replaceState(null, '', q ? '#' + q : location.pathname + location.search);
@@ -292,8 +330,9 @@
   }
 
   let refreshTimer;
+  function resetPaging() { st.page = 0; st.cursors = []; st.vcur = ''; st.gateSeq++; const g = $('#gate'); if (g) g.hidden = true; }
   function changed(delay = 150) {
-    writeHash(); renderChips();
+    writeHash(); renderChips(); resetPaging();
     clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, delay);
   }
 
@@ -345,8 +384,11 @@
         h('input', { type: 'checkbox', value: v.v, checked: st.sel[k].has(v.v) }), h('span', { class: 'l', title: v.l }, v.l), h('span', { class: 'n' }, fmt(v.n))));
       if (!rows.length) rows.push(h('div', { class: 'opt-state' }, q ? 'No ' + LABEL[k].toLowerCase() + ' matches "' + q + '".' : 'No values with the current filters.'));
       if (r.truncated) rows.push(h('div', { class: 'opt-state' }, 'Showing the top ' + r.values.length + '. Search to find the rest.'));
+      if (r.pending) rows.push(h('div', { class: 'opt-state pending' }, 'Counting more databases…'));
       opts.replaceChildren(...rows);
       if (st.sel[k].size) renderChips(); // chips restored from the URL now get their proper labels
+      if (r.pending && (st.fpoll[k] = (st.fpoll[k] || 0) + 1) <= 6) setTimeout(() => { if (my === st.fseq[k]) loadFacet(k); }, 1500);
+      else if (!r.pending) st.fpoll[k] = 0;
     } catch (e) {
       if (my === st.fseq[k]) opts.replaceChildren(h('div', { class: 'opt-state' }, e.message, ' ', h('button', { class: 'btn btn-small', type: 'button', onclick: () => loadFacet(k) }, 'Retry')));
     }
@@ -401,26 +443,28 @@
     for (let i = 0; i < 6; i++) rows.push(h('tr', { class: 'skel' }, ...Array.from({ length: 7 }, (_, j) => h('td', {}, h('span', { style: 'width:' + [20, 70, 60, 50, 65, 55, 30][j] + '%' })))));
     $('#rows').replaceChildren(...rows);
   }
-  function renderRows(rows, batched) {
+  function renderRows(rows, batched, start = 0) {
     const out = []; let lastBatch = null;
     rows.forEach((r, i) => {
       if (batched && r.batch !== lastBatch) {
         lastBatch = r.batch;
         out.push(h('tr', { class: 'batch' }, h('td', { colspan: '7' }, 'Batch ' + r.batch + (r.new ? ' · newest' : ''))));
       }
-      const tr = rowEl(r, i);
+      const tr = rowEl(r, start + i);
       if (st.reveal.has(r.id)) { tr.classList.add('reveal'); tr.style.setProperty('--i', String(out.length % 12)); }
       out.push(tr);
     });
     $('#rows').replaceChildren(...out);
     st.reveal.clear();
   }
-  function setCount(total, unlocked) {
+  function setCount(total, unlocked, pending) {
     const c = $('#count');
     st.total = total;
-    if (unlocked == null) c.replaceChildren(h('span', { class: 'data' }, fmt(total)), total === 1 ? ' contact matches' : ' contacts match',
-      h('small', {}, activeCount() ? 'with your filters' : 'in the whole directory'));
-    else c.replaceChildren(h('span', { class: 'data' }, fmt(total)), ' match', h('small', {}, fmt(unlocked) + ' unlocked by you · ' + fmt(Math.max(0, total - unlocked)) + ' left'));
+    const n = h('span', { class: 'data' }, fmt(total) + (pending ? '+' : ''));
+    const more = pending ? h('span', { class: 'pending' }, 'Searching more databases…') : null;
+    if (unlocked == null) c.replaceChildren(n, total === 1 && !pending ? ' contact matches' : ' contacts match',
+      h('small', {}, more || (activeCount() ? 'with your filters' : 'in the whole directory')));
+    else c.replaceChildren(n, ' match', h('small', {}, fmt(unlocked) + ' unlocked by you · ' + fmt(Math.max(0, total - unlocked)) + (pending ? '+' : '') + ' left', more ? ' · ' : '', more));
   }
   function showEmpty(kind) {
     const box = $('#empty'); box.hidden = false; box.className = 'empty'; box.replaceChildren();
@@ -430,42 +474,116 @@
       box.append(h('h3', {}, 'No contacts match all of these filters'),
         h('p', {}, 'Remove a filter to widen the search, or ask us to build this exact list.'),
         h('div', { class: 'chips' }, removable.map(b => h('button', { class: 'btn btn-small', type: 'button', onclick: () => b.click() }, icon('x'), b.getAttribute('aria-label')))),
-        w ? h('a', { class: 'btn', href: waURL(summary(), 0), target: '_blank', rel: 'noopener' }, icon('wa'), 'Request this list on WhatsApp') : null);
+        w ? h('a', { class: 'btn btn-wa', href: waURL(summary(), 0), target: '_blank', rel: 'noopener' }, icon('wa'), 'Request this list on WhatsApp') : null,
+        affCard('empty'));
     }
     if (kind === 'error') box.append(h('h3', {}, "Results didn't load"), h('p', {}, st.lastError || ''), h('button', { class: 'btn', type: 'button', onclick: refresh }, 'Try again'));
   }
 
-  async function refresh() {
-    const my = ++st.seq; const q = qs();
-    $('#empty').hidden = true; $('#cap').hidden = true; skeleton();
+  const scrollToSheet = () => $('#sheet').scrollIntoView({ behavior: mq('(prefers-reduced-motion: reduce)') ? 'auto' : 'smooth', block: 'start' });
+
+  // refresh loads the current page. Signed-in visitors with unlocks page through
+  // them (keyset cursors); everyone else browses masked preview pages. When a
+  // database is still being searched in the background (pending), the count shows
+  // "N+" and the page quietly asks again until the answer is complete.
+  async function refresh(opts = {}) {
+    const my = ++st.seq; const q = qs(); const amp = q ? q + '&' : '';
+    clearTimeout(st.pollT);
+    if (!opts.quiet) { $('#empty').hidden = true; skeleton(); st.polls = 0; }
     try {
-      let total, rows, unlocked = null, view = null;
+      let total = 0, unlocked = null, view = null, pending = false, info = null;
       if (st.me) {
-        const [v, p] = await Promise.all([api('/api/me/view?' + q + (st.newest ? (q ? '&' : '') + 'newest=1' : '')), api('/api/preview?' + q)]);
+        view = await api('/api/me/view?' + amp + (st.newest ? 'newest=1&' : '') + 'after=' + encodeURIComponent(st.vcur));
         if (my !== st.seq) return;
-        view = v; total = v.total; unlocked = v.unlocked;
-        rows = v.rows.length ? v.rows : (v.unlocked === 0 ? p.rows : []);
-        st.me.ads_today = v.ads_today; st.me.max_ads = v.max_ads; st.view = v;
-        $('#cap').hidden = !v.capped;
-        if (v.capped) $('#cap').textContent = 'Showing your latest ' + fmt(v.rows.length) + ' unlocked contacts here. Export CSV to get all ' + fmt(v.unlocked) + '.';
-        $('#export').hidden = !v.unlocked; $('#export').href = BASE + '/api/me/export?' + q;
-        $('#newest-wrap').hidden = !v.unlocked;
-        renderRows(rows, v.rows.length > 0);
-      } else {
-        const p = await api('/api/preview?' + q);
-        if (my !== st.seq) return;
-        total = p.total; rows = p.rows; renderRows(rows, false);
+        st.view = view; total = view.total; unlocked = view.unlocked; pending = !!view.pending;
+        st.me.ads_today = view.ads_today; st.me.max_ads = view.max_ads;
+        $('#export').hidden = !view.unlocked; $('#export').href = BASE + '/api/me/export?' + q;
+        $('#newest-wrap').hidden = !view.unlocked;
+        if (view.unlocked > 0) {
+          st.mode = 'view'; info = view;
+          if (!view.rows.length && st.cursors.length) { st.vcur = st.cursors.pop(); return refresh(opts); } // walked past the end
+          renderRows(view.rows, true, st.cursors.length * (view.page_size || 50));
+        }
       }
-      setCount(total, unlocked);
-      if (!total) { $('#rows').replaceChildren(); showEmpty('none'); }
+      if (!view || view.unlocked === 0) {
+        const p = await api('/api/preview?' + amp + 'page=' + st.page);
+        if (my !== st.seq) return;
+        st.mode = 'preview'; st.page = p.page; st.pages = p.pages; info = p;
+        total = Math.max(total, p.total); pending = pending || !!p.pending;
+        renderRows(p.rows, false, p.page * PER);
+      }
+      setCount(total, unlocked, pending);
+      if (!total && !pending) { $('#rows').replaceChildren(); showEmpty('none'); }
+      renderPager(info);
       renderWhatsApp(summary(), total);
       renderDock(view);
+      if (pending && st.polls < 8) { st.polls++; st.pollT = setTimeout(() => { if (my === st.seq) refresh({ quiet: true }); }, 1500); }
     } catch (e) {
       if (my !== st.seq) return;
       if (e.status === 401 && st.me) { signedOut(); return refresh(); }
-      st.lastError = e.message; $('#rows').replaceChildren(); showEmpty('error');
+      st.lastError = e.message; $('#rows').replaceChildren(); showEmpty('error'); $('#pager').hidden = true;
     }
-    refreshFacets();
+    if (!opts.quiet) refreshFacets();
+  }
+
+  const pgBtn = (label, disabled, onclick, primary) => h('button', { class: 'btn btn-small' + (primary ? ' btn-primary' : ''), type: 'button', disabled, onclick }, label);
+
+  function renderPager(info) {
+    const pg = $('#pager'); pg.replaceChildren(); pg.hidden = true;
+    if (!info) return;
+    if (st.mode === 'view') {
+      const per = info.page_size || 50, pageNo = st.cursors.length + 1;
+      const pages = st.newest ? 0 : Math.max(1, Math.ceil(info.unlocked / per));
+      if (!st.cursors.length && !info.next) return;
+      pg.hidden = false;
+      pg.append(pgBtn('Previous', !st.cursors.length, () => { st.vcur = st.cursors.pop() || ''; refresh(); scrollToSheet(); }),
+        h('span', { class: 'pg-info' }, 'Page ' + pageNo + (pages ? ' of ' + pages : '') + ' of your contacts'), h('span', { class: 'grow' }),
+        pgBtn('Next', !info.next, () => { st.cursors.push(st.vcur); st.vcur = info.next; refresh(); scrollToSheet(); }, true));
+      return;
+    }
+    if (!info.total) return;
+    pg.hidden = false;
+    pg.append(pgBtn('Previous', info.page === 0, () => goPage(info.page - 1)),
+      h('span', { class: 'pg-info' }, 'Preview page ' + (info.page + 1) + ' of ' + info.pages), h('span', { class: 'grow' }));
+    if (info.page < info.pages - 1) pg.append(pgBtn('Next ' + PER, false, () => goPage(info.page + 1), true));
+    else if (info.total > (info.page + 1) * PER) pg.append(h('span', { class: 'note' }, 'End of the free preview.'),
+      h('button', { class: 'btn btn-primary btn-small', type: 'button', 'data-unlock': '' }, icon('lock'), 'Unlock real contacts'));
+  }
+
+  // Every further page of the preview opens after a short sponsor break, once
+  // per page and tab (going back never asks again). The first page is free.
+  function goPage(p) {
+    if (p < 0) return;
+    const secs = S().ads.preview_seconds || 0;
+    if (S().ads.preview_gate && secs > 0 && p >= 1 && !NO_ADS && store.sget(pageKey(p)) !== '1') return previewBreak(p, secs);
+    st.page = p; refresh(); scrollToSheet();
+  }
+
+  function previewBreak(p, seconds) {
+    const box = $('#gate'); box.hidden = false; box.replaceChildren();
+    const my = ++st.gateSeq;
+    const secs = h('span', { class: 'data' }, seconds + ' s');
+    const feed = h('div', { class: 'feed', role: 'progressbar', 'aria-label': 'Sponsor break progress', 'aria-valuemin': '0', 'aria-valuemax': '100' }, h('i'));
+    const slot = h('div', { class: 'break-slot' }); sponsorSlot(slot);
+    box.append(h('div', { class: 'row' }, h('h3', {}, 'Sponsor break, then the next ' + PER + ' contacts'), h('span', { class: 'grow' }), secs), feed, slot,
+      h('div', { class: 'row' }, placed('sponsor_button') ? spAnchor('btn', spBadge(), S().ads.cta) : null,
+        h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { st.gateSeq++; box.hidden = true; } }, 'Cancel')), affCard('break'));
+    box.scrollIntoView({ behavior: mq('(prefers-reduced-motion: reduce)') ? 'auto' : 'smooth', block: 'nearest' });
+    const need = seconds * 1000; let shown = 0, last = performance.now();
+    (async () => {
+      while (shown < need) {
+        await sleep(250);
+        if (my !== st.gateSeq) return;
+        const now = performance.now();
+        if (!document.hidden) shown += now - last; // counts only while visible
+        last = now;
+        $('i', feed).style.width = Math.min(100, (shown / need) * 100) + '%';
+        feed.setAttribute('aria-valuenow', String(Math.round((shown / need) * 100)));
+        secs.textContent = Math.max(0, Math.ceil((need - shown) / 1000)) + ' s';
+      }
+      store.sset(pageKey(p), '1'); box.hidden = true; st.page = p;
+      await refresh(); scrollToSheet();
+    })();
   }
 
   // ----- the unlock dock (state machine) -----
@@ -477,7 +595,7 @@
     const left = view ? view.remaining : st.total;
     const site = S().site, w = S().whatsapp;
     const sponsorBtn = () => placed('empty_states') ? spAnchor('btn', spBadge(), S().ads.cta) : null;
-    const waBtn = label => w ? h('a', { class: 'btn', href: waURL(summary(), st.total), target: '_blank', rel: 'noopener' }, icon('wa'), label) : null;
+    const waBtn = label => w ? h('a', { class: 'btn btn-wa', href: waURL(summary(), st.total), target: '_blank', rel: 'noopener' }, icon('wa'), label) : null;
     mobile.hidden = true;
     if (['signin', 'code', 'break', 'claiming'].includes(st.dock)) return; // those states render themselves
     d.replaceChildren();
@@ -490,7 +608,7 @@
     if (st.me && view && view.remaining === 0) {
       st.dock = 'done';
       d.append(h('h3', {}, "You've unlocked every contact for these filters"),
-        h('p', {}, 'Widen your filters to find new people, or get a custom list built for you.'), h('div', { class: 'row' }, waBtn('Ask for a bigger list'), sponsorBtn()));
+        h('p', {}, 'Widen your filters to find new people, or get a custom list built for you.'), h('div', { class: 'row' }, waBtn('Ask for a bigger list'), sponsorBtn()), affCard('empty'));
       return;
     }
     if (st.me && st.me.ads_today >= st.me.max_ads) {
@@ -498,15 +616,18 @@
       const now = new Date(), next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
       const hrs = Math.max(1, Math.round((next - now) / 36e5));
       d.append(h('h3', {}, "That's today's " + fmt(st.me.max_ads * N()) + ' free contacts'),
-        h('p', {}, 'Your limit resets in about ' + hrs + ' hour' + (hrs > 1 ? 's' : '') + '. Need more now? We do bulk exports.'), h('div', { class: 'row' }, waBtn('Get bulk data'), sponsorBtn()));
+        h('p', {}, 'Your limit resets in about ' + hrs + ' hour' + (hrs > 1 ? 's' : '') + '. Need more now? We do bulk exports.'), h('div', { class: 'row' }, waBtn('Get bulk data'), sponsorBtn()), affCard('empty'));
       return;
     }
     st.dock = 'idle';
-    const btn = h('button', { class: 'btn btn-primary btn-big', type: 'button', 'data-unlock': '' }, icon('lock'), 'Unlock next ' + Math.min(N(), left || N()) + ' contacts');
+    const video = rewardedOn();
+    const k = Math.min(N(), left || N());
+    const btn = h('button', { class: 'btn btn-primary btn-big', type: 'button', 'data-unlock': '' }, icon('lock'), video ? 'Watch a short video, unlock ' + k : 'Unlock next ' + k + ' contacts');
+    const what = video ? 'short sponsor video' : 'short sponsor break';
     d.append(h('div', { class: 'grid2' },
-      h('div', {}, h('h3', {}, st.me ? fmt(left) + ' contacts left for these filters' : 'See real emails and direct dials'),
-        h('p', { class: 'muted' }, st.me ? 'Each short sponsor break unlocks ' + N() + ' you have never seen. ' + (st.me.max_ads - st.me.ads_today) + ' breaks left today.'
-          : 'Free. Confirm your email once, then each short sponsor break unlocks ' + N() + ' contacts.')), btn));
+      h('div', {}, h('h3', {}, st.me ? fmt(left) + (view && view.pending ? '+' : '') + ' contacts left for these filters' : 'See real emails and direct dials'),
+        h('p', { class: 'muted' }, st.me ? 'Each ' + what + ' unlocks ' + N() + ' you have never seen, shown the moment it ends. ' + (st.me.max_ads - st.me.ads_today) + ' left today.'
+          : 'Free. Confirm your email once, then each ' + what + ' unlocks ' + N() + ' contacts.')), btn), affCard('dock'));
     mobile.hidden = false;
   }
 
@@ -520,7 +641,8 @@
     try { tok = await api('/api/ad/start', { method: 'POST', body: {} }); }
     catch (e) { return dockError(e); }
     st.token = tok.token;
-    (mode === 'smartlink' ? smartlinkBreak : sponsorBreak)(tok);
+    const m = tok.mode || mode;
+    (m === 'smartlink' ? smartlinkBreak : m === 'gpt_rewarded' && S().ads.gpt_ad_unit ? rewardedBreak : sponsorBreak)(tok);
   }
 
   function dockError(e) {
@@ -541,15 +663,12 @@
     return { d, feed, secs, unlock, note };
   }
 
-  async function sponsorBreak(tok) {
-    const { d, feed, secs, unlock, note } = breakShell('Sponsor break');
-    const slot = h('div', { class: 'break-slot' });
-    const sl = (S().ads.slots || {}).sponsor;
-    if (sl && consentOK()) {
-      if (sl.isolation === 'direct') injectHTML(slot, sl.html);
-      else slot.append(h('iframe', { src: BASE + '/ad-frame?slot=sponsor' + (mq('(max-width: 727px)') ? '&m=1' : ''), title: 'Advertisement', sandbox: 'allow-scripts allow-popups allow-popups-to-escape-sandbox' }));
-    } else if (placed('slot_fallback')) slot.append(houseAd(120));
-    d.append(slot, h('div', { class: 'row' }, unlock, placed('sponsor_button') ? spAnchor('btn', spBadge(), S().ads.cta) : null, h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => dockSet('idle') }, 'Cancel')), note);
+  async function sponsorBreak(tok, note0) {
+    const { d, feed, secs, note } = breakShell('Sponsor break');
+    const slot = h('div', { class: 'break-slot' }); sponsorSlot(slot);
+    if (note0) note.textContent = note0;
+    d.append(slot, h('div', { class: 'row' }, placed('sponsor_button') ? spAnchor('btn', spBadge(), S().ads.cta) : null,
+      h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => dockSet('idle') }, 'Cancel')), note, affCard('break'));
     const policy = S().ads.adblock;
     let blocked = false;
     if (policy !== 'allow') adBlocked().then(b => {
@@ -568,10 +687,67 @@
       feed.setAttribute('aria-valuenow', String(Math.round((shown / need) * 100)));
       secs.textContent = Math.max(0, Math.ceil((need - shown) / 1000)) + ' s';
     }
-    secs.textContent = 'Ready';
-    if (blocked && policy === 'require') { unlock.disabled = true; return; }
-    unlock.disabled = false; unlock.focus({ preventScroll: true });
-    unlock.addEventListener('click', () => claim(tok.token), { once: true });
+    if (blocked && policy === 'require') { secs.textContent = ''; return; }
+    secs.textContent = 'Unlocking…';
+    claim(tok.token); // no extra click: contacts appear the moment the break ends
+  }
+
+  // ----- Google Ad Manager rewarded video (falls back to the sponsor break) -----
+  const rewardedOn = () => S().ads.mode === 'gpt_rewarded' && !!S().ads.gpt_ad_unit;
+  let gptLoading;
+  function loadGPT() {
+    window.googletag = window.googletag || { cmd: [] };
+    return (gptLoading = gptLoading || new Promise((res, rej) => {
+      const sc = h('script', { src: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', async: true, crossorigin: 'anonymous' });
+      sc.onload = res; sc.onerror = () => { gptLoading = null; rej(new Error('gpt')); }; document.head.append(sc);
+    }));
+  }
+  function rewardedBreak(tok) {
+    const { d, secs, note } = breakShell('Sponsor video');
+    secs.textContent = 'Loading…';
+    const status = h('p', { class: 'muted' }, 'Getting a short video from our sponsor. Your ' + N() + ' contacts appear the moment it finishes.');
+    const watch = h('button', { class: 'btn btn-primary btn-big', type: 'button', hidden: true }, 'Watch the video (about 15–30 s)');
+    d.append(status, h('div', { class: 'row' }, watch, h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => { done(); dockSet('idle'); } }, 'Cancel')), note);
+    let settled = false, granted = false, slot = null, pa = null;
+    const handlers = {};
+    const done = () => {
+      settled = true; clearTimeout(timer);
+      if (pa) for (const [ev, fn] of Object.entries(handlers)) pa.removeEventListener(ev, fn);
+      if (slot) { try { window.googletag.destroySlots([slot]); } catch { /* already gone */ } slot = null; }
+      if (foreignHash()) writeHash(); // put the visitor's filters back in the address bar
+    };
+    const live = () => !settled && st.dock === 'break' && st.token === tok.token;
+    // no video available (unsupported page, no fill, blocked): the sponsor break takes over, same token
+    const fallback = () => { if (!live()) return; done(); sponsorBreak(tok, 'No sponsor video right now, so here is a short sponsor break instead.'); };
+    const timer = setTimeout(fallback, 8000);
+    loadGPT().then(() => window.googletag.cmd.push(() => {
+      if (!live()) return;
+      const gt = window.googletag;
+      slot = gt.defineOutOfPageSlot(S().ads.gpt_ad_unit, gt.enums.OutOfPageFormat.REWARDED);
+      if (!slot) return fallback();
+      pa = gt.pubads();
+      slot.addService(pa);
+      if (!consentOK()) pa.setPrivacySettings({ limitedAds: true });
+      handlers.rewardedSlotReady = e => {
+        if (e.slot !== slot || !live()) return;
+        clearTimeout(timer);
+        secs.textContent = 'Ready'; status.textContent = 'Your video is ready.';
+        watch.hidden = false; watch.focus({ preventScroll: true });
+        watch.onclick = () => { watch.hidden = true; secs.textContent = 'Playing…'; e.makeRewardedVisible(); }; // opt-in, as Google requires
+      };
+      handlers.rewardedSlotGranted = e => { if (e.slot !== slot || !live()) return; granted = true; done(); claim(tok.token); };
+      handlers.rewardedSlotClosed = e => {
+        if (e.slot !== slot || granted || !live()) return;
+        done(); st.dock = 'error';
+        $('#dock').replaceChildren(h('div', { class: 'notice warn' }, 'The video was closed before the end, so nothing was unlocked.'),
+          h('div', { class: 'row' }, h('button', { class: 'btn btn-primary', type: 'button', onclick: () => { st.dock = 'idle'; startUnlock(); } }, 'Try again'),
+            h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => dockSet('idle') }, 'Back')));
+      };
+      handlers.slotRenderEnded = e => { if (e.slot === slot && e.isEmpty) fallback(); };
+      for (const [ev, fn] of Object.entries(handlers)) pa.addEventListener(ev, fn);
+      gt.enableServices();
+      gt.display(slot);
+    })).catch(fallback);
   }
 
   function smartlinkBreak(tok) {
@@ -608,9 +784,9 @@
       st.me.ads_today = res.ads_today;
       toast(res.rows.length + ' new contacts unlocked');
       bc && bc.postMessage({ t: 'sync' });
-      st.dock = 'idle'; st.newest = false; $('#newest').checked = false;
+      st.dock = 'idle'; st.newest = false; $('#newest').checked = false; st.cursors = []; st.vcur = '';
       await refresh();
-      $('#sheet').scrollIntoView({ behavior: mq('(prefers-reduced-motion: reduce)') ? 'auto' : 'smooth', block: 'start' });
+      scrollToSheet();
     } catch (e) {
       if (e.code === 'too_early' && !retried) { await sleep((e.extra.wait_ms || 1000) + 300); return claim(token, true); }
       if (e.code === 'token_used' || e.code === 'token_invalid') { st.dock = 'idle'; return startUnlock(); }
@@ -727,9 +903,12 @@
     $('#has-phone').addEventListener('change', e => { st.phone = e.target.checked; changed(); });
     $('#clear-all').addEventListener('click', clearAll);
     $('#open-filters').addEventListener('click', openFilters);
-    $('#newest').addEventListener('change', e => { st.newest = e.target.checked; refresh(); });
+    $('#newest').addEventListener('change', e => { st.newest = e.target.checked; st.cursors = []; st.vcur = ''; refresh(); });
     document.addEventListener('click', e => { if (e.target.closest('[data-unlock]')) startUnlock(); });
-    window.addEventListener('hashchange', () => { readHash(); for (const [k] of DIMS) syncChecks(k); renderChips(); refresh(); });
+    window.addEventListener('hashchange', () => {
+      if (foreignHash() || location.hash.slice(1) === qs()) return; // overlay state, or our own filters coming back
+      readHash(); for (const [k] of DIMS) syncChecks(k); renderChips(); resetPaging(); refresh();
+    });
     bc && bc.addEventListener('message', async m => { if (m.data && m.data.t === 'sync') { await loadMe(); if (!['break', 'code', 'signin', 'claiming'].includes(st.dock)) refresh(); } });
     (signedHint() ? loadMe() : Promise.resolve()).then(refresh);
   }
@@ -785,7 +964,7 @@
     try { CFG = await api('/api/config'); } catch { /* defaults keep the page usable */ }
     const ann = $('#announce');
     if (ann && S().site.announcement) { ann.textContent = S().site.announcement; ann.hidden = false; }
-    renderPlacements(); renderSlots(); consentBanner(); renderWhatsApp('', null); renderDonations();
+    renderPlacements(); renderSlots(); renderAff(); consentBanner(); renderWhatsApp('', null); renderDonations();
     if (PAGE === 'index') initDirectory();
     if (PAGE === 'remove') initRemove();
     if (PAGE === 'unsubscribe') initUnsub();

@@ -240,7 +240,14 @@ func TestDeleteSuppressesAndFixesCounts(t *testing.T) {
 		t.Fatalf("find: %v %v", ids, err)
 	}
 	usBefore := scalar(t, d, `SELECT cnt FROM dims WHERE dim=1 AND value_n='united states'`)
-	if n, err := DeleteContacts(ctx, d, ids, 1); err != nil || n != 1 {
+	keys, err := ContactKeys(ctx, d.R, ids)
+	if err != nil || len(keys) < 2 {
+		t.Fatalf("keys: %v %v", keys, err)
+	}
+	if err := AddSuppress(ctx, d, keys, 1); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := DeleteContacts(ctx, d, ids); err != nil || n != 1 {
 		t.Fatalf("delete: %d %v", n, err)
 	}
 	if scalar(t, d, `SELECT cnt FROM dims WHERE dim=1 AND value_n='united states'`) != usBefore-1 {

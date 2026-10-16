@@ -90,10 +90,20 @@ func Daily(ctx context.Context, d *db.DB, clk platform.Clock) error {
 	return nil
 }
 
+// Unlocks is where per-user unlocks live (every contact store).
+type Unlocks interface {
+	Prune(ctx context.Context) error
+	ForgetUser(ctx context.Context, uid int64) error
+}
+
 // Monthly vacuums when worthwhile and safe, prunes long-gone users and orphans.
-func Monthly(ctx context.Context, d *db.DB, clk platform.Clock, stat platform.DiskStatFunc, log *slog.Logger) error {
+func Monthly(ctx context.Context, d *db.DB, clk platform.Clock, stat platform.DiskStatFunc, log *slog.Logger, un Unlocks) error {
 	now := clk.Now()
-	if _, err := d.W.ExecContext(ctx, `DELETE FROM unlocked WHERE contact_id NOT IN (SELECT id FROM contacts)`); err != nil {
+	if un != nil {
+		if err := un.Prune(ctx); err != nil {
+			log.Warn("pruning unlocks", "err", err)
+		}
+	} else if _, err := d.W.ExecContext(ctx, `DELETE FROM unlocked WHERE contact_id NOT IN (SELECT id FROM contacts)`); err != nil {
 		return err
 	}
 	cutoff := now.AddDate(-2, 0, 0).Unix()
@@ -109,6 +119,11 @@ func Monthly(ctx context.Context, d *db.DB, clk platform.Clock, stat platform.Di
 	}
 	rows.Close()
 	for _, id := range ids {
+		if un != nil {
+			if err := un.ForgetUser(ctx, id); err != nil {
+				return err // keep the user row so the next run retries the unreachable store
+			}
+		}
 		for _, q := range []string{`DELETE FROM sessions WHERE user_id=?`, `DELETE FROM unlocked WHERE user_id=?`,
 			`DELETE FROM user_daily WHERE user_id=?`, `DELETE FROM outbox WHERE user_id=?`, `DELETE FROM users WHERE id=?`} {
 			if _, err := d.W.ExecContext(ctx, q, id); err != nil {

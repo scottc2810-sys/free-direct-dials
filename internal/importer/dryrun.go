@@ -96,19 +96,19 @@ func DryRun(r io.Reader, mapping Mapping, n int, disp *emailcheck.Disposable) (D
 				row.Fields[k] = v
 			}
 		}
-		set("name", r.name)
-		set("title", r.title)
-		set("company", r.company)
-		set("website", r.website)
-		set("linkedin", r.linkedin)
-		set("email", r.email)
-		set("phone", r.phone)
+		set("name", r.Name)
+		set("title", r.Title)
+		set("company", r.Company)
+		set("website", r.Website)
+		set("linkedin", r.LinkedIn)
+		set("email", r.Email)
+		set("phone", r.Phone)
 		for i, d := range filter.Dims {
-			set(d.Key, r.dimRaw[i])
+			set(d.Key, r.DimRaw[i])
 		}
-		set("tech", strings.Join(r.tech, ", "))
-		if len(r.extra) > 0 {
-			row.Extra = r.extra
+		set("tech", strings.Join(r.Tech, ", "))
+		if len(r.Extra) > 0 {
+			row.Extra = r.Extra
 		}
 		if reason != "" {
 			st.Skipped++

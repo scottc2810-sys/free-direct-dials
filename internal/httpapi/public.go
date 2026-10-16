@@ -20,6 +20,7 @@ import (
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/seo"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 )
 
 // ---------- page rendering ----------
@@ -65,15 +66,16 @@ type pageData struct {
 
 func (a *App) baseData(page string) pageData {
 	cfg := a.Settings.Get()
-	return pageData{Page: page, Base: a.Cfg.BasePath, Stats: importer.LoadStats(context.Background(), a.DB.R), Site: cfg.Site,
+	return pageData{Page: page, Base: a.Cfg.BasePath, Stats: a.Store.Stats(context.Background()), Site: cfg.Site,
 		ContactsAd: cfg.Limits.ContactsPerAd, MaxAds: cfg.Limits.MaxAdsPerDay}
 }
 
-// publicCSP is strict unless the admin enabled a "direct" ad snippet, which
-// must be allowed to run third-party inline script in the page.
+// publicCSP is strict unless the admin enabled a "direct" ad snippet or Google
+// rewarded ads: both must run third-party (and inline) script in the page.
 func (a *App) publicCSP() string {
-	direct := false
-	for _, s := range a.Settings.Get().Ads.Slots {
+	cfg := a.Settings.Get()
+	direct := cfg.Ads.Mode == "gpt_rewarded"
+	for _, s := range cfg.Ads.Slots {
 		if s.Enabled && s.Isolation == "direct" {
 			direct = true
 		}
@@ -89,7 +91,7 @@ func (a *App) publicCSP() string {
 
 // render writes an HTML page, memoised per dataset + settings version.
 func (a *App) render(w http.ResponseWriter, r *http.Request, name, key string, sMaxAge int, build func() (pageData, error)) {
-	ck := fmt.Sprintf("%s|%d|%d|%s", name, a.DB.DatasetVersion(), a.Settings.Version(), key)
+	ck := fmt.Sprintf("%s|%d|%d|%s", name, a.Store.Version(), a.Settings.Version(), key)
 	body, ok := a.pages.Get(ck)
 	status := http.StatusOK
 	if ok && len(body) > 3 && body[0] == '#' { // status prefix "#410\n"
@@ -277,24 +279,22 @@ func (a *App) pageSEO(w http.ResponseWriter, r *http.Request) {
 			}
 			return d, nil
 		}
-		labels, values := a.dimNames(r.Context(), p.Country, p.Industry)
+		ctx := r.Context()
 		q := url.Values{}
-		if p.Country > 0 {
-			q.Set("country", values[p.Country])
+		if p.Country != "" {
+			q.Set("country", p.Country)
 		}
-		if p.Industry > 0 {
-			q.Set("industry", values[p.Industry])
+		if p.Industry != "" {
+			q.Set("industry", p.Industry)
 		}
 		f, _ := filter.Parse(q)
-		res, err := a.Search.Resolve(r.Context(), f)
+		pv, err := a.Store.Preview(store.WithWait(ctx), f, 0, search.PreviewLimit, 1) // cached as HTML: must be complete
 		if err != nil {
 			return d, err
 		}
-		total, rows, err := a.Search.Preview(r.Context(), res)
-		if err != nil {
-			return d, err
-		}
-		cn, in := labels[p.Country], labels[p.Industry]
+		total, rows := pv.Total, pv.Rows
+		cn := a.label(ctx, "country", p.Country)
+		in := a.label(ctx, "industry", p.Industry)
 		switch p.Kind {
 		case "country":
 			d.H1 = "Free B2B contacts in " + cn
@@ -312,7 +312,7 @@ func (a *App) pageSEO(w http.ResponseWriter, r *http.Request) {
 		d.ToolURL = a.Cfg.BasePath + "/#" + d.Filter
 		d.Crumbs = []Crumb{{"Free Direct Dials", a.Cfg.URL("/")}}
 		if p.Kind == "combo" {
-			if cp := a.findPage(r.Context(), "country", p.Country, 0); cp != "" {
+			if cp := a.findPage(ctx, "country", p.Country, ""); cp != "" {
 				d.Crumbs = append(d.Crumbs, Crumb{cn, a.Cfg.URL("/" + cp + "/")})
 			}
 		}
@@ -320,22 +320,22 @@ func (a *App) pageSEO(w http.ResponseWriter, r *http.Request) {
 		var rel []seo.Page
 		switch p.Kind {
 		case "country":
-			rel, _ = seo.List(r.Context(), a.DB.R, "combo", p.Country, 0, 16)
+			rel, _ = seo.List(ctx, a.DB.R, "combo", p.Country, "", 16)
 		case "industry":
-			rel, _ = seo.List(r.Context(), a.DB.R, "combo", 0, p.Industry, 16)
+			rel, _ = seo.List(ctx, a.DB.R, "combo", "", p.Industry, 16)
 		default:
-			rel, _ = seo.List(r.Context(), a.DB.R, "combo", p.Country, 0, 13)
+			rel, _ = seo.List(ctx, a.DB.R, "combo", p.Country, "", 13)
 		}
-		ids := []int64{}
+		var cs, is []string
 		for _, x := range rel {
-			ids = append(ids, x.Country, x.Industry)
+			cs, is = append(cs, x.Country), append(is, x.Industry)
 		}
-		rl, _ := a.dimNames(r.Context(), ids...)
+		cl, il := a.Store.Labels(ctx, "country", cs), a.Store.Labels(ctx, "industry", is)
 		for _, x := range rel {
 			if x.Slug == p.Slug {
 				continue
 			}
-			label := rl[x.Industry] + " in " + rl[x.Country]
+			label := orDefault(il[x.Industry], pretty(x.Industry)) + " in " + orDefault(cl[x.Country], pretty(x.Country))
 			d.Related = append(d.Related, Related{Label: label, URL: a.Cfg.BasePath + "/" + x.Slug + "/", Count: x.Count})
 		}
 		var items []map[string]any
@@ -363,7 +363,7 @@ func webThousands(n int64) string {
 	return b.String()
 }
 
-func (a *App) findPage(ctx context.Context, kind string, country, industry int64) string {
+func (a *App) findPage(ctx context.Context, kind, country, industry string) string {
 	ps, _ := seo.List(ctx, a.DB.R, kind, country, industry, 1)
 	if len(ps) == 0 {
 		return ""
@@ -371,29 +371,25 @@ func (a *App) findPage(ctx context.Context, kind string, country, industry int64
 	return ps[0].Slug
 }
 
-func (a *App) dimNames(ctx context.Context, ids ...int64) (labels, values map[int64]string) {
-	labels, values = map[int64]string{}, map[int64]string{}
-	var args []any
-	for _, id := range ids {
-		if id > 12 {
-			args = append(args, id)
+// label is the display spelling of a normalised value ("" stays "").
+func (a *App) label(ctx context.Context, dim, value string) string {
+	if value == "" {
+		return ""
+	}
+	return orDefault(a.Store.Labels(ctx, dim, []string{value})[value], pretty(value))
+}
+
+// pretty title-cases a normalised value when no store knows its label.
+func pretty(v string) string {
+	b := []rune(v)
+	up := true
+	for i, r := range b {
+		if up && r >= 'a' && r <= 'z' {
+			b[i] = r - 32
 		}
+		up = r == ' ' || r == '-'
 	}
-	if len(args) == 0 {
-		return
-	}
-	rows, err := a.DB.R.QueryContext(ctx, `SELECT id, value_n, label FROM dims WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int64
-		var v, l string
-		rows.Scan(&id, &v, &l)
-		labels[id], values[id] = l, v
-	}
-	return
+	return string(b)
 }
 
 // ---------- sitemap / llms / robots / favicon / ad frame ----------
@@ -411,11 +407,11 @@ type smURL struct {
 }
 
 func (a *App) sitemap(w http.ResponseWriter, r *http.Request) {
-	st := importer.LoadStats(r.Context(), a.DB.R)
+	st := a.Store.Stats(r.Context())
 	day := time.Unix(max(st.Updated, 1), 0).UTC().Format("2006-01-02")
 	us := urlset{NS: "http://www.sitemaps.org/schemas/sitemap/0.9"}
 	us.URLs = append(us.URLs, smURL{a.Cfg.URL("/"), day, "1.0"})
-	pages, _ := seo.List(r.Context(), a.DB.R, "", 0, 0, 2000)
+	pages, _ := seo.List(r.Context(), a.DB.R, "", "", "", 2000)
 	for _, p := range pages {
 		us.URLs = append(us.URLs, smURL{a.Cfg.URL("/" + p.Slug + "/"), time.Unix(p.Updated, 0).UTC().Format("2006-01-02"), "0.7"})
 	}
@@ -428,7 +424,7 @@ func (a *App) sitemap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) llms(w http.ResponseWriter, r *http.Request) {
-	st := importer.LoadStats(r.Context(), a.DB.R)
+	st := a.Store.Stats(r.Context())
 	cfg := a.Settings.Get()
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Free Direct Dials\n\n> A free B2B contact directory by %s: %s contacts with direct phone numbers and business emails across %d countries.\n\n",
@@ -441,7 +437,7 @@ func (a *App) llms(w http.ResponseWriter, r *http.Request) {
 		a.Cfg.URL("/"), a.Cfg.URL("/"), a.Cfg.URL("/country/{country}/"), a.Cfg.URL("/industry/{industry}/"),
 		a.Cfg.URL("/country/{country}/{industry}/"), a.Cfg.URL("/remove"), a.Cfg.URL("/sitemap.xml"))
 	b.WriteString("## Popular lists\n\n")
-	pages, _ := seo.List(r.Context(), a.DB.R, "", 0, 0, 25)
+	pages, _ := seo.List(r.Context(), a.DB.R, "", "", "", 25)
 	for _, p := range pages {
 		fmt.Fprintf(&b, "- %s (%s contacts)\n", a.Cfg.URL("/"+p.Slug+"/"), webThousands(p.Count))
 	}
@@ -490,6 +486,20 @@ func (a *App) adFrame(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}body{display:flex;align-items:center;justify-content:center;min-height:100vh}</style></head><body>%s</body></html>`, html)
 }
 
+// adsTxt serves the Authorized Digital Sellers file set in Settings → Ads.
+// Empty means 404, which ad networks read as "no restriction".
+func (a *App) adsTxt(w http.ResponseWriter, r *http.Request) {
+	body := a.Settings.Get().Ads.AdsTxt
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	cachePublic(w, 3600)
+	if strings.TrimSpace(body) == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Write([]byte(body + "\n"))
+}
+
 func (a *App) healthz(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	w.Write([]byte("ok"))
@@ -513,7 +523,14 @@ func (a *App) readyz(w http.ResponseWriter, r *http.Request) {
 	if lv >= jobs.LevelReadOnly {
 		status = http.StatusServiceUnavailable
 	}
-	checks["dataset_version"], checks["schema"] = a.DB.DatasetVersion(), a.DB.SchemaVersion(ctx)
+	checks["dataset_version"], checks["schema"] = a.Store.Version(), a.DB.SchemaVersion(ctx)
+	down := 0
+	for _, s := range a.Store.Statuses(ctx) {
+		if s.State == "down" {
+			down++
+		}
+	}
+	checks["stores_down"] = down // partial results, not an outage: readiness stays green
 	checks["ok"] = status == http.StatusOK
 	writeJSON(w, status, checks)
 }
@@ -529,7 +546,7 @@ func (a *App) apiConfig(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`,"turnstile":`)
 	jt, _ := json.Marshal(a.Cfg.TurnstileSiteKey)
 	b.Write(jt)
-	fmt.Fprintf(&b, `,"dataset":%d,"settings":`, a.DB.DatasetVersion())
+	fmt.Fprintf(&b, `,"dataset":%d,"settings":`, a.Store.Version())
 	b.Write(a.Settings.PublicJSON())
 	b.WriteString(`}`)
 	writeRaw(w, http.StatusOK, b.Bytes())
@@ -537,7 +554,7 @@ func (a *App) apiConfig(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) apiStats(w http.ResponseWriter, r *http.Request) {
 	cachePublic(w, 300)
-	writeJSON(w, http.StatusOK, importer.LoadStats(r.Context(), a.DB.R))
+	writeJSON(w, http.StatusOK, a.Store.Stats(r.Context()))
 }
 
 func (a *App) parseFilter(w http.ResponseWriter, q url.Values) (filter.Filter, bool) {
@@ -549,32 +566,71 @@ func (a *App) parseFilter(w http.ResponseWriter, q url.Values) (filter.Filter, b
 	return f, true
 }
 
+// completeness of a federated answer, which decides how long it may be cached.
+type completeness byte
+
+const (
+	complete completeness = 'F'
+	partial  completeness = 'Q' // a database is down: retry within 20 s
+	pending  completeness = 'P' // more databases still being searched: the page polls
+)
+
+func stateOf(isPartial, isPending bool) completeness {
+	switch {
+	case isPending:
+		return pending
+	case isPartial:
+		return partial
+	}
+	return complete
+}
+
 // cached serves a JSON body from the LRU or computes it once (singleflight).
-func (a *App) cached(w http.ResponseWriter, key string, sMaxAge int, compute func() (any, error)) {
-	if b, ok := a.Search.Cache.Get(key); ok {
-		cachePublic(w, sMaxAge)
-		w.Header().Set("X-Cache", "HIT")
-		writeRaw(w, http.StatusOK, b)
+// Incomplete answers are kept briefly (here and at the CDN) so the next poll
+// sees the background search's results.
+func (a *App) cached(w http.ResponseWriter, key string, sMaxAge int, compute func() (any, completeness, error)) {
+	serve := func(b []byte, hit string) {
+		state, body := completeness(b[0]), b[1:]
+		switch state {
+		case pending:
+			w.Header().Set("Cache-Control", "public, max-age=0, s-maxage=1")
+		case partial:
+			cachePublic(w, min(sMaxAge, 20))
+		default:
+			cachePublic(w, sMaxAge)
+		}
+		w.Header().Set("X-Cache", hit)
+		writeRaw(w, http.StatusOK, body)
+	}
+	if b, ok := a.Store.Cache.Get(key); ok && len(b) > 0 {
+		serve(b, "HIT")
 		return
 	}
-	b, err := a.Search.SF.Do(key, func() ([]byte, error) {
-		v, err := compute()
+	b, err := a.Store.SF.Do(key, func() ([]byte, error) {
+		v, state, err := compute()
 		if err != nil {
 			return nil, err
 		}
-		b, err := json.Marshal(v)
-		if err == nil {
-			a.Search.Cache.Set(key, b, 5*time.Minute)
+		js, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
 		}
-		return b, err
+		b := append([]byte{byte(state)}, js...)
+		ttl := 5 * time.Minute
+		switch state {
+		case pending:
+			ttl = 1500 * time.Millisecond
+		case partial:
+			ttl = 20 * time.Second
+		}
+		a.Store.Cache.Set(key, b, ttl)
+		return b, nil
 	})
 	if err != nil {
 		a.queryError(w, err)
 		return
 	}
-	cachePublic(w, sMaxAge)
-	w.Header().Set("X-Cache", "MISS")
-	writeRaw(w, http.StatusOK, b)
+	serve(b, "MISS")
 }
 
 func (a *App) queryError(w http.ResponseWriter, err error) {
@@ -605,43 +661,38 @@ func (a *App) apiFacets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	key := fmt.Sprintf("facets|%d|%s|%s|%s", a.DB.DatasetVersion(), dim, normalize.Fold(vq), f.Canonical())
+	key := fmt.Sprintf("facets|%d|%s|%s|%s", a.Store.Version(), dim, normalize.Fold(vq), f.Canonical())
 	// shared computation must outlive the first caller (singleflight): detach cancellation
 	bg := context.WithoutCancel(r.Context())
-	a.cached(w, key, 60, func() (any, error) {
-		res, err := a.Search.Resolve(bg, f)
-		if err != nil {
-			return nil, err
-		}
-		return a.Search.Facets(bg, res, dim, vq)
+	a.cached(w, key, 60, func() (any, completeness, error) {
+		res, err := a.Store.Facets(bg, f, dim, vq)
+		return res, stateOf(res.Partial, res.Pending), err
 	})
 }
 
-type previewResp struct {
-	Total int64        `json:"total"`
-	Rows  []search.Row `json:"rows"`
-}
-
+// apiPreview returns one page of masked rows. Anyone may browse the first
+// Limits.PreviewPages pages (10 rows each); the page asks for a sponsor break
+// before each page after the first. Real details always need an unlock.
 func (a *App) apiPreview(w http.ResponseWriter, r *http.Request) {
-	f, ok := a.parseFilter(w, r.URL.Query())
+	q := r.URL.Query()
+	f, ok := a.parseFilter(w, q)
 	if !ok {
 		return
 	}
-	key := fmt.Sprintf("preview|%d|%s", a.DB.DatasetVersion(), f.Canonical())
+	pages := a.Settings.Get().Limits.PreviewPages
+	page, _ := strconv.Atoi(q.Get("page"))
+	page = max(0, min(page, pages-1))
+	key := fmt.Sprintf("preview|%d|%d|%d|%s", a.Store.Version(), page, pages, f.Canonical())
 	bg := context.WithoutCancel(r.Context())
-	a.cached(w, key, 60, func() (any, error) {
-		res, err := a.Search.Resolve(bg, f)
-		if err != nil {
-			return nil, err
-		}
-		total, rows, err := a.Search.Preview(bg, res)
-		return previewResp{Total: total, Rows: rows}, err
+	a.cached(w, key, 60, func() (any, completeness, error) {
+		pv, err := a.Store.Preview(bg, f, page, search.PreviewLimit, pages)
+		return pv, stateOf(pv.Partial, pv.Pending), err
 	})
 }
 
 // purgeData drops every cache after a data change (import, removal).
 func (a *App) purgeData(ctx context.Context) {
-	a.Search.Cache.Purge()
+	a.Store.Cache.Purge()
 	a.pages.Purge()
 	a.purgeCDN(ctx, "/", "/api/config", "/api/stats", "/sitemap.xml", "/llms.txt")
 }

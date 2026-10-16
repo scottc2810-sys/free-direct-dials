@@ -1,10 +1,13 @@
 // Package unlock implements the monetisation core: ad tokens, claiming the
-// next N never-before-unlocked contacts, the personal view and CSV export.
+// next N never-before-unlocked contacts, the personal (paged) view and CSV export.
 //
 // Invariants (acceptance #6, #7, #9):
-//   - a contact is handed to a user at most once (PRIMARY KEY + single writer + per-user lock)
-//   - a token is single-use, owned by one user, and only valid after MinSeconds−1
+//   - a contact is handed to a user at most once (PRIMARY KEY in each store + per-user lock)
+//   - a token is single-use, owned by one user, and only valid after the break's minimum time
 //   - a claim that finds nothing new does not consume the token or the daily quota
+//
+// Tokens, quotas and batch numbers live in the control database; the unlocks
+// themselves live next to the contacts, in whichever store holds them.
 package unlock
 
 import (
@@ -25,6 +28,7 @@ import (
 	"markemind/dials/internal/platform"
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 )
 
 var (
@@ -44,9 +48,13 @@ func (e *TooSoonError) Error() string {
 
 const maxActiveTokens = 3
 
+// gptFloor is the minimum token age in Google rewarded mode: Google grants the
+// reward only after the ad completes, so the server floor just stops scripts.
+const gptFloor = 5
+
 type Service struct {
-	DB       *db.DB
-	Search   *search.Service
+	DB       *db.DB            // control database: tokens, quotas, batch numbers
+	Fed      *store.Federation // contact stores
 	Settings *settings.Store
 	Clock    platform.Clock
 
@@ -72,6 +80,14 @@ type Token struct {
 	MaxAds     int    `json:"max_ads"`
 }
 
+// minSeconds is how long a token of mode must age before it can be claimed.
+func minSeconds(mode string, cfg settings.All) int {
+	if mode == "gpt_rewarded" {
+		return min(cfg.Ads.MinSeconds, gptFloor)
+	}
+	return cfg.Ads.MinSeconds
+}
+
 func (s *Service) adsToday(ctx context.Context, q db.Querier, uid int64, day int) int {
 	var n int
 	q.QueryRowContext(ctx, `SELECT ads FROM user_daily WHERE user_id=? AND day=?`, uid, day).Scan(&n)
@@ -93,7 +109,8 @@ func (s *Service) Start(ctx context.Context, uid int64, ip string) (Token, error
 	cfg := s.Settings.Get()
 	now := s.Clock.Now()
 	day := platform.Day(now)
-	t := Token{Mode: cfg.Ads.Mode, MinSeconds: cfg.Ads.MinSeconds, MaxAds: cfg.Limits.MaxAdsPerDay}
+	t := Token{Mode: cfg.Ads.Mode, MaxAds: cfg.Limits.MaxAdsPerDay}
+	t.MinSeconds = minSeconds(t.Mode, cfg)
 	if t.Mode == "smartlink" {
 		t.SmartLink = cfg.Ads.SmartLink
 	}
@@ -135,10 +152,6 @@ func (s *Service) Claim(ctx context.Context, uid int64, tokenID string, f filter
 	if len(tokenID) < 10 || len(tokenID) > 64 {
 		return res, ErrTokenInvalid
 	}
-	r, err := s.Search.Resolve(ctx, f)
-	if err != nil {
-		return res, err
-	}
 	unlockFn := s.lock(uid)
 	defer unlockFn()
 
@@ -147,89 +160,69 @@ func (s *Service) Claim(ctx context.Context, uid int64, tokenID string, f filter
 	if ip != "" && s.ipCount(ip, day, 0) >= cfg.Limits.MaxAdsPerDayIP {
 		return res, ErrIPLimit
 	}
-	var ids []int64
+	var owner, created int64
+	var used int
+	var mode string
+	err := s.DB.W.QueryRowContext(ctx, `SELECT user_id, created, used, mode FROM ad_tokens WHERE id=?`, tokenID).Scan(&owner, &created, &used, &mode)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != uid) {
+		return res, ErrTokenInvalid
+	}
+	if err != nil {
+		return res, err
+	}
+	if used != 0 {
+		return res, ErrTokenUsed
+	}
+	need := time.Duration(minSeconds(mode, cfg)-1) * time.Second
+	if age := now.Sub(time.UnixMilli(created)); age < need {
+		return res, &TooSoonError{Wait: need - age}
+	}
+	ads := s.adsToday(ctx, s.DB.W, uid, day)
+	res.AdsToday = ads
+	if ads >= cfg.Limits.MaxAdsPerDay {
+		return res, ErrDailyLimit
+	}
+	var last int64
+	if err := s.DB.W.QueryRowContext(ctx, `SELECT last_batch FROM users WHERE id=?`, uid).Scan(&last); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return res, err
+	}
+	res.Batch = last + 1
+	rows, err := s.Fed.Claim(ctx, uid, res.Batch, f, cfg.Limits.ContactsPerAd, now.Unix())
+	if err != nil {
+		return res, err
+	}
+	if len(rows) == 0 {
+		return res, ErrNothingLeft
+	}
 	err = s.DB.Tx(ctx, func(tx *sql.Tx) error {
-		var owner, created int64
-		var used int
-		err := tx.QueryRowContext(ctx, `SELECT user_id, created, used FROM ad_tokens WHERE id=?`, tokenID).Scan(&owner, &created, &used)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != uid) {
-			return ErrTokenInvalid
-		}
-		if err != nil {
-			return err
-		}
-		if used != 0 {
-			return ErrTokenUsed
-		}
-		need := time.Duration(cfg.Ads.MinSeconds-1) * time.Second
-		if age := now.Sub(time.UnixMilli(created)); age < need {
-			return &TooSoonError{Wait: need - age}
-		}
-		ads := s.adsToday(ctx, tx, uid, day)
-		res.AdsToday = ads
-		if ads >= cfg.Limits.MaxAdsPerDay {
-			return ErrDailyLimit
-		}
-		if r.Impossible() {
-			return ErrNothingLeft
-		}
-		where, args := r.Where("")
-		args = append(args, uid, cfg.Limits.ContactsPerAd)
-		ids, err = search.QueryIDs(ctx, tx, `SELECT c.id FROM contacts c WHERE `+where+`
-			AND NOT EXISTS (SELECT 1 FROM unlocked u WHERE u.user_id=? AND u.contact_id=c.id) ORDER BY c.id LIMIT ?`, args...)
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
-			return ErrNothingLeft
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(batch),0)+1 FROM unlocked WHERE user_id=?`, uid).Scan(&res.Batch); err != nil {
-			return err
-		}
-		vals := make([]string, len(ids))
-		iargs := make([]any, 0, len(ids)*4)
-		for i, id := range ids {
-			vals[i] = "(?,?,?,?)"
-			iargs = append(iargs, uid, id, res.Batch, now.Unix())
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO unlocked(user_id, contact_id, batch, ts) VALUES `+strings.Join(vals, ","), iargs...); err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(ctx, `UPDATE ad_tokens SET used=1 WHERE id=?`, tokenID); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO user_daily(user_id, day, ads, last_claim) VALUES(?,?,1,?)
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET last_batch=? WHERE id=? AND last_batch<?`, res.Batch, uid, res.Batch); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO user_daily(user_id, day, ads, last_claim) VALUES(?,?,1,?)
 			ON CONFLICT(user_id, day) DO UPDATE SET ads=ads+1, last_claim=excluded.last_claim`, uid, day, now.Unix())
-		res.AdsToday = ads + 1
 		return err
 	})
 	if err != nil {
 		return res, err
 	}
+	res.AdsToday = ads + 1
 	if ip != "" {
 		s.ipCount(ip, day, 1)
 	}
-	if res.Rows, err = s.Search.FetchRows(ctx, s.DB.R, ids, false); err != nil {
-		return res, err
-	}
-	for i := range res.Rows {
-		res.Rows[i].Batch, res.Rows[i].New = res.Batch, true
-	}
-	res.Total, res.Unlocked, err = s.counts(ctx, uid, r)
+	res.Rows = rows
+	res.Total, res.Unlocked, err = s.counts(ctx, uid, f)
 	res.Remaining = max(0, res.Total-res.Unlocked)
 	return res, err
 }
 
-func (s *Service) counts(ctx context.Context, uid int64, r *search.Resolved) (total, unlocked int64, err error) {
-	if total, err = s.Search.Count(ctx, r); err != nil {
+func (s *Service) counts(ctx context.Context, uid int64, f filter.Filter) (total, unlocked int64, err error) {
+	if total, _, err = s.Fed.Count(ctx, f); err != nil {
 		return
 	}
-	if r.Impossible() {
-		return total, 0, nil
-	}
-	where, args := r.Where("")
-	err = s.DB.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM unlocked u JOIN contacts c ON c.id=u.contact_id WHERE u.user_id=? AND `+where,
-		append([]any{uid}, args...)...).Scan(&unlocked)
+	unlocked, err = s.Fed.Unlocked(ctx, uid, f)
 	return
 }
 
@@ -239,69 +232,61 @@ type View struct {
 	Unlocked    int64        `json:"unlocked"`
 	Remaining   int64        `json:"remaining"`
 	LatestBatch int64        `json:"latest_batch"`
-	Capped      bool         `json:"capped"`
 	AdsToday    int          `json:"ads_today"`
 	MaxAds      int          `json:"max_ads"`
+	PageSize    int          `json:"page_size"`
+	Next        string       `json:"next"`              // cursor of the next page ("" = last page)
+	Partial     bool         `json:"partial,omitempty"` // a database is down: its contacts are missing
+	Pending     bool         `json:"pending,omitempty"` // more databases are still being searched
 }
 
-// View lists the user's unlocked contacts matching f, newest batch first.
-func (s *Service) View(ctx context.Context, uid int64, f filter.Filter, newestOnly bool) (View, error) {
+// View lists one page of the user's unlocked contacts matching f, newest batch
+// first. cursor is "" for the first page or a previous View.Next.
+func (s *Service) View(ctx context.Context, uid int64, f filter.Filter, newestOnly bool, cursor string) (View, error) {
 	cfg := s.Settings.Get()
-	v := View{Rows: []search.Row{}, MaxAds: cfg.Limits.MaxAdsPerDay}
+	v := View{Rows: []search.Row{}, MaxAds: cfg.Limits.MaxAdsPerDay, PageSize: cfg.Limits.PageSize}
 	v.AdsToday = s.adsToday(ctx, s.DB.R, uid, platform.Day(s.Clock.Now()))
-	r, err := s.Search.Resolve(ctx, f)
+	total, st, err := s.Fed.Count(ctx, f)
 	if err != nil {
 		return v, err
 	}
-	if v.Total, v.Unlocked, err = s.counts(ctx, uid, r); err != nil {
+	v.Total, v.Partial, v.Pending = total, len(st.Partial) > 0, st.Pending
+	if v.Unlocked, err = s.Fed.Unlocked(ctx, uid, f); err != nil {
 		return v, err
 	}
 	v.Remaining = max(0, v.Total-v.Unlocked)
-	s.DB.R.QueryRowContext(ctx, `SELECT COALESCE(MAX(batch),0) FROM unlocked WHERE user_id=?`, uid).Scan(&v.LatestBatch)
+	s.DB.R.QueryRowContext(ctx, `SELECT last_batch FROM users WHERE id=?`, uid).Scan(&v.LatestBatch)
 	if v.Unlocked == 0 {
 		return v, nil
 	}
-	ids, batches, err := s.unlockedIDs(ctx, uid, r, newestOnly, v.LatestBatch, cfg.Limits.ViewCap)
+	var only int64
+	if newestOnly {
+		only = v.LatestBatch
+	}
+	rows, next, err := s.Fed.ViewPage(ctx, uid, f, store.ParseCursor(cursor), only, v.PageSize, false)
 	if err != nil {
 		return v, err
 	}
-	v.Capped = int64(len(ids)) < v.Unlocked && !newestOnly
-	if v.Rows, err = s.Search.FetchRows(ctx, s.DB.R, ids, false); err != nil {
-		return v, err
+	for i := range rows {
+		rows[i].New = rows[i].Batch == v.LatestBatch
 	}
-	for i := range v.Rows {
-		b := batches[v.Rows[i].ID]
-		v.Rows[i].Batch, v.Rows[i].New = b, b == v.LatestBatch
-	}
+	v.Rows, v.Next = rows, next.String()
 	return v, nil
 }
 
-func (s *Service) unlockedIDs(ctx context.Context, uid int64, r *search.Resolved, newestOnly bool, latest int64, limit int) ([]int64, map[int64]int64, error) {
-	where, args := r.Where("")
-	q := `SELECT u.contact_id, u.batch FROM unlocked u JOIN contacts c ON c.id=u.contact_id WHERE u.user_id=? AND ` + where
-	a := append([]any{uid}, args...)
-	if newestOnly {
-		q += ` AND u.batch=?`
-		a = append(a, latest)
-	}
-	q += ` ORDER BY u.batch DESC, u.contact_id LIMIT ?`
-	a = append(a, limit)
-	rows, err := s.DB.R.QueryContext(ctx, q, a...)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	var ids []int64
-	batches := map[int64]int64{}
-	for rows.Next() {
-		var id, b int64
-		if err := rows.Scan(&id, &b); err != nil {
-			return nil, nil, err
-		}
-		ids = append(ids, id)
-		batches[id] = b
-	}
-	return ids, batches, rows.Err()
+// Summary is the signed-in header: today's breaks and lifetime unlocks.
+type Summary struct {
+	AdsToday int
+	MaxAds   int
+	Unlocked int64
+}
+
+func (s *Service) Summary(ctx context.Context, uid int64) (Summary, error) {
+	cfg := s.Settings.Get()
+	sm := Summary{MaxAds: cfg.Limits.MaxAdsPerDay, AdsToday: s.adsToday(ctx, s.DB.R, uid, platform.Day(s.Clock.Now()))}
+	var err error
+	sm.Unlocked, err = s.Fed.Unlocked(ctx, uid, filter.Filter{})
+	return sm, err
 }
 
 // SafeCell neutralises spreadsheet formula injection.
@@ -312,42 +297,54 @@ func SafeCell(s string) string {
 	return s
 }
 
-const exportCap = 100_000
+const (
+	exportCap   = 100_000
+	exportChunk = 1000
+)
 
 // Export streams the user's unlocked contacts matching f as CSV.
 func (s *Service) Export(ctx context.Context, uid int64, f filter.Filter, w io.Writer) (int, error) {
-	r, err := s.Search.Resolve(ctx, f)
-	if err != nil {
-		return 0, err
-	}
-	ids, batches, err := s.unlockedIDs(ctx, uid, r, false, 0, exportCap)
-	if err != nil {
-		return 0, err
-	}
-	cw := csv.NewWriter(w)
-	base := []string{"Name", "Title", "Company", "Email", "Phone", "LinkedIn", "Website", "City", "State", "Country", "Industry",
-		"Sector", "Company Type", "Company Size", "Revenue", "Seniority", "Department", "Decision Power", "Email Confidence", "Unlock Batch"}
-	// two passes over chunks keep memory flat: first collect extra column names
-	extraKeys := map[string]bool{}
-	const chunk = 1000
-	for i := 0; i < len(ids); i += chunk {
-		rows, err := s.Search.FetchRows(ctx, s.DB.R, ids[i:min(i+chunk, len(ids))], true)
-		if err != nil {
-			return 0, err
-		}
-		for _, row := range rows {
-			for k := range row.Extra {
-				if len(extraKeys) < 40 {
-					extraKeys[k] = true
+	// walk pages in view order; two passes keep memory flat: first collect extra column names
+	walk := func(fn func(search.Row) error) error {
+		var cur store.Cursor
+		seen := 0
+		for seen < exportCap {
+			rows, next, err := s.Fed.ViewPage(ctx, uid, f, cur, 0, min(exportChunk, exportCap-seen), true)
+			if err != nil {
+				return err
+			}
+			for _, r := range rows {
+				if err := fn(r); err != nil {
+					return err
 				}
 			}
+			seen += len(rows)
+			if next.IsZero() || len(rows) == 0 {
+				return nil
+			}
+			cur = next
 		}
+		return nil
+	}
+	extraKeys := map[string]bool{}
+	if err := walk(func(r search.Row) error {
+		for k := range r.Extra {
+			if len(extraKeys) < 40 {
+				extraKeys[k] = true
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
 	}
 	extras := make([]string, 0, len(extraKeys))
 	for k := range extraKeys {
 		extras = append(extras, k)
 	}
 	sort.Strings(extras)
+	cw := csv.NewWriter(w)
+	base := []string{"Name", "Title", "Company", "Email", "Phone", "LinkedIn", "Website", "City", "State", "Country", "Industry",
+		"Sector", "Company Type", "Company Size", "Revenue", "Seniority", "Department", "Decision Power", "Email Confidence", "Unlock Batch"}
 	header := append(append([]string(nil), base...), extras...)
 	for i := range header {
 		header[i] = SafeCell(header[i])
@@ -356,25 +353,20 @@ func (s *Service) Export(ctx context.Context, uid int64, f filter.Filter, w io.W
 		return 0, err
 	}
 	n := 0
-	for i := 0; i < len(ids); i += chunk {
-		rows, err := s.Search.FetchRows(ctx, s.DB.R, ids[i:min(i+chunk, len(ids))], true)
-		if err != nil {
-			return n, err
+	err := walk(func(x search.Row) error {
+		rec := []string{x.Name, x.Title, x.Company, x.Email, x.Phone, x.LinkedIn, x.Website, x.City, x.State, x.Country, x.Industry,
+			x.Sector, x.CType, x.CSize, x.Revenue, x.Seniority, x.Division, x.Decision, x.EConf, strconv.FormatInt(x.Batch, 10)}
+		for _, k := range extras {
+			rec = append(rec, x.Extra[k])
 		}
-		for _, x := range rows {
-			rec := []string{x.Name, x.Title, x.Company, x.Email, x.Phone, x.LinkedIn, x.Website, x.City, x.State, x.Country, x.Industry,
-				x.Sector, x.CType, x.CSize, x.Revenue, x.Seniority, x.Division, x.Decision, x.EConf, strconv.FormatInt(batches[x.ID], 10)}
-			for _, k := range extras {
-				rec = append(rec, x.Extra[k])
-			}
-			for j := range rec {
-				rec[j] = SafeCell(rec[j])
-			}
-			if err := cw.Write(rec); err != nil {
-				return n, err
-			}
-			n++
+		for j := range rec {
+			rec[j] = SafeCell(rec[j])
 		}
+		n++
+		return cw.Write(rec)
+	})
+	if err != nil {
+		return n, err
 	}
 	cw.Flush()
 	return n, cw.Error()

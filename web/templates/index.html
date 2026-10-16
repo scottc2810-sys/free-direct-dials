@@ -46,10 +46,12 @@
           <tbody id="rows"></tbody>
         </table>
         <div id="empty" hidden></div>
-        <div class="cap" id="cap" hidden></div>
+        <nav class="pager" id="pager" aria-label="Result pages" hidden></nav>
       </div>
+      <div class="dock gate" id="gate" hidden aria-live="polite"></div>
       <div class="dock" id="dock"></div>
       <p class="note" style="margin-top:10px" data-place="results"></p>
+      <div data-aff="results"></div>
       <div class="mobile-cta" id="mobile-cta"><button class="btn btn-primary btn-big" type="button" data-unlock>Unlock next {{.ContactsAd}}</button></div>
     </section>
   </div>

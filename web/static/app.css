@@ -1,17 +1,17 @@
-/* Free Direct Dials: "green-bar call sheet". Tokens first; everything derives from them. */
+/* Free Direct Dials: "blue-bar call sheet" in royal blue. Tokens first; everything derives from them. */
 :root {
-  --paper: #fbfcfa;
-  --paper-2: #f1f4ef;
-  --band: #e8f1e9;
-  --ink: #14150f;
-  --ink-2: #3b4037;
-  --ink-3: #626a5e;
-  --rule: #d8ded4;
-  --rule-strong: #b3bdae;
-  --accent: #0b6b4b;
-  --accent-hover: #08573c;
+  --paper: #fbfcfe;
+  --paper-2: #f1f3f9;
+  --band: #eaeffc;
+  --ink: #12141b;
+  --ink-2: #393e4c;
+  --ink-3: #5d6477;
+  --rule: #d7dce8;
+  --rule-strong: #b0b8cc;
+  --accent: #2a4fd6;
+  --accent-hover: #1f3fb3;
   --accent-ink: #ffffff;
-  --accent-soft: #dcefe4;
+  --accent-soft: #e1e8fc;
   --hl: #fff27a;
   --hl-ink: #2f2a00;
   --redact: #1d1f1a;
@@ -20,7 +20,7 @@
   --warn: #8a5a00;
   --warn-soft: #fff4d6;
   --ok: #157a3c;
-  --shadow: 0 1px 2px rgba(20, 21, 15, .06), 0 10px 28px -14px rgba(20, 21, 15, .22);
+  --shadow: 0 1px 2px rgba(18, 20, 27, .06), 0 10px 28px -14px rgba(18, 20, 27, .22);
   --radius: 6px;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -32,18 +32,18 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #101210;
-    --paper-2: #161a15;
-    --band: #172119;
-    --ink: #e8ece5;
-    --ink-2: #c2c9bd;
-    --ink-3: #98a192;
-    --rule: #283026;
-    --rule-strong: #3c4739;
-    --accent: #3ddc97;
-    --accent-hover: #6ae6ae;
-    --accent-ink: #04150d;
-    --accent-soft: #143324;
+    --paper: #0e1017;
+    --paper-2: #141824;
+    --band: #161d33;
+    --ink: #e7eaf3;
+    --ink-2: #c0c6d6;
+    --ink-3: #959db2;
+    --rule: #262c3d;
+    --rule-strong: #3a4258;
+    --accent: #7b9bff;
+    --accent-hover: #a1b8ff;
+    --accent-ink: #070d24;
+    --accent-soft: #1a2552;
     --hl: #5c5414;
     --hl-ink: #fff7c2;
     --redact: #cfd6ca;
@@ -265,6 +265,7 @@ a.li { color: var(--ink-2); }
 @media (prefers-reduced-motion: reduce) {
   .cs tr.reveal td::after { animation: none; display: none; }
   .skel td span { animation: none; }
+  .pending::before { animation: none; }
   * { scroll-behavior: auto !important; }
 }
 
@@ -304,7 +305,23 @@ a.li { color: var(--ink-2); }
 .empty { padding: 36px 20px; text-align: center; display: grid; gap: 12px; justify-items: center; }
 .empty h3 { font-size: 1.125rem; }
 .empty p { color: var(--ink-2); max-width: 46ch; }
-.cap { font-size: .8125rem; color: var(--ink-3); padding: 10px 12px; border-top: 1px solid var(--rule); }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border-top: 1px solid var(--rule); background: var(--paper); }
+.pager .pg-info { font-size: .8125rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.pager .grow { flex: 1; }
+.gate { margin-top: 12px; border-color: var(--accent); }
+.pending { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-3); font-weight: 500; }
+.pending::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: fdd-pulse 1.1s ease-in-out infinite; }
+@keyframes fdd-pulse { 50% { opacity: .25; } }
+.aff { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--rule);
+  border-radius: var(--radius); background: var(--paper); color: var(--ink); text-decoration: none; }
+.aff:hover { border-color: var(--accent); color: var(--ink); }
+.aff b { font-size: .9375rem; }
+.aff p { flex: 1 1 240px; color: var(--ink-2); font-size: .875rem; }
+.aff .btn { margin-left: auto; }
+.dock .aff { margin-top: 0; }
+.aff-mini { font-size: .8125rem; color: var(--ink-2); text-decoration: none; }
+.btn-wa, .btn.btn-wa { background: var(--wa); border-color: var(--wa); color: var(--wa-ink); }
+.btn-wa:hover, .btn.btn-wa:hover { background: var(--wa-hover); border-color: var(--wa-hover); color: var(--wa-ink); }
 
 /* ---------- sections below the tool ---------- */
 .sec { padding: 44px 0; border-top: 1px solid var(--rule); }

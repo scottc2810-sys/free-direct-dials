@@ -3,7 +3,8 @@
 //	dials serve                 run the web server + background workers
 //	dials migrate               apply database migrations and exit
 //	dials admin create <user>   create/reset a superadmin (prints the TOTP enrolment QR)
-//	dials import <file> [-sheet N]   import a CSV / TSV / .csv.gz / .xlsx file from disk
+//	dials import <file> [-sheet N] [-target auto|ID]   import a CSV / TSV / .csv.gz / .xlsx file from disk
+//	dials stores                list contact databases (built-in + Supabase/Postgres) and their usage
 //	dials gen <rows> <out.csv>  write a synthetic test file
 //	dials backup                take a backup now
 //	dials restore <backup.db.zst> <dest.db>
@@ -27,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -45,6 +47,7 @@ import (
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/seo"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 	"markemind/dials/internal/unlock"
 )
 
@@ -109,6 +112,8 @@ func main() {
 		err = blocklistCmd(ctx, cfg, args)
 	case "check":
 		err = checkCmd(ctx, cfg)
+	case "stores":
+		err = storesCmd(ctx, cfg)
 	case "version":
 		fmt.Println(version)
 	default:
@@ -209,7 +214,11 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if backupKey == nil && cfg.Prod() {
 		log.Warn("BACKUP_KEY is not set: backups are compressed but NOT encrypted; set it before copying backups off the server")
 	}
-	searchSvc := search.New(d, search.NewLRU(30<<20, nil), 4)
+	fed, err := openStores(ctx, cfg, d, clk, log)
+	if err != nil {
+		return err
+	}
+	defer fed.Close()
 	host := ""
 	if u, err := url.Parse(cfg.PublicOrigin); err == nil {
 		host = u.Hostname()
@@ -219,8 +228,8 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		hasLog = hasLog || p.Name == "log"
 	}
 	app := &httpapi.App{
-		Cfg: cfg, DB: d, Log: log, Clock: clk, Search: searchSvc, Settings: st,
-		Unlock:     &unlock.Service{DB: d, Search: searchSvc, Settings: st, Clock: clk},
+		Cfg: cfg, DB: d, Log: log, Clock: clk, Store: fed, Settings: st,
+		Unlock:     &unlock.Service{DB: d, Fed: fed, Settings: st, Clock: clk},
 		Users:      &auth.Users{DB: d, Clock: clk},
 		Sessions:   &auth.Sessions{DB: d, Clock: clk, TTL: 30 * 24 * time.Hour},
 		OTP:        &auth.OTP{DB: d, Clock: clk, Secret: cfg.SecretKey, Sender: devOTPLogger{mailer, log, hasLog && !cfg.Prod()}},
@@ -262,23 +271,40 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		return err
 	}})
 	sched.Add(&jobs.Job{Name: "seo", Daily: true, Hour: 4, Fn: func(ctx context.Context) error {
-		if _, err := seo.Refresh(ctx, d, clk, 500, 25); err != nil {
+		if _, err := seo.Refresh(ctx, d, fed, clk, 500, 25); err != nil {
 			return err
 		}
-		app.Search.Cache.Purge()
+		fed.Cache.Purge()
+		return nil
+	}})
+	// remote stores: keepalive writes (free Supabase projects pause after ~7 idle days),
+	// reconnects, sizes and quota alerts
+	sched.Add(&jobs.Job{Name: "stores", Every: 6 * time.Hour, Fn: func(ctx context.Context) error {
+		for _, w := range fed.Monitor(ctx) {
+			if w.Err != "" {
+				alerter.Alert(ctx, "store_down_"+w.Store, "Contact database unreachable: "+w.Store,
+					w.Err+"\n\nIts contacts are missing from results and uploads are paused. If it is a paused Supabase project, restore it in the Supabase dashboard (RUNBOOK §Supabase).")
+			} else if w.Pct >= 80 {
+				alerter.Alert(ctx, fmt.Sprintf("store_full_%s_%d", w.Store, w.Pct/10), fmt.Sprintf("Contact database %s is %d%% full", w.Store, w.Pct),
+					"New uploads move to the next database with room at 90%. Add a database in Superadmin → Databases before every one is full.")
+			}
+		}
 		return nil
 	}})
 	sched.Add(&jobs.Job{Name: "monthly", Daily: true, Hour: 4, Minute: 30, Fn: func(ctx context.Context) error {
 		if clk.Now().UTC().Day() != 1 {
 			return nil
 		}
-		return jobs.Monthly(ctx, d, clk, platform.Disk, log)
+		return jobs.Monthly(ctx, d, clk, platform.Disk, log, fed)
 	}})
 	bg, cancelBG := context.WithCancel(context.Background())
 	schedDone := make(chan struct{})
 	go func() { sched.Run(bg); close(schedDone) }()
 	if n, _ := countSEO(ctx, d); n == 0 {
 		sched.RunNow(bg, "seo")
+	}
+	if len(fed.Members()) > 1 { // ping every remote database now, then every 6 hours
+		sched.RunNow(bg, "stores")
 	}
 
 	srv := &http.Server{
@@ -375,11 +401,46 @@ func printQR(text string) {
 	}
 }
 
+// openStores connects every registered contact database.
+func openStores(ctx context.Context, cfg *config.Config, d *db.DB, clk platform.Clock, log *slog.Logger) (*store.Federation, error) {
+	fed := &store.Federation{Control: d, Clock: clk, Log: log, Key: store.KeyFrom(cfg.SecretKey), DataDir: cfg.DataDir,
+		Cache: search.NewLRU(30<<20, nil)}
+	return fed, fed.Open(ctx)
+}
+
+func storesCmd(ctx context.Context, cfg *config.Config) error {
+	d, err := openDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fed, err := openStores(ctx, cfg, d, platform.SystemClock{}, log)
+	if err != nil {
+		return err
+	}
+	defer fed.Close()
+	fed.Monitor(ctx)
+	fmt.Printf("%-4s %-24s %-9s %-10s %12s %10s %6s  %s\n", "ID", "NAME", "KIND", "STATE", "CONTACTS", "SIZE", "QUOTA", "HOST")
+	for _, s := range fed.Statuses(ctx) {
+		quota := "-"
+		if s.CapBytes > 0 {
+			quota = fmt.Sprintf("%d%%", s.Pct)
+		}
+		fmt.Printf("%-4d %-24s %-9s %-10s %12d %9.1fM %6s  %s\n", s.ID, s.Name, s.Kind, s.State, s.Contacts, float64(s.Bytes)/(1<<20), quota, s.Host)
+		if s.LastErr != "" {
+			fmt.Printf("     last error: %s\n", s.LastErr)
+		}
+	}
+	return nil
+}
+
 func importCmd(ctx context.Context, cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	sheet := fs.Int("sheet", 1, "worksheet number for .xlsx files (1 = first)")
+	targetFlag := fs.String("target", "auto", "database id for new contacts (see `dials stores`), or auto")
 	if len(args) == 0 {
-		return errors.New("usage: dials import <file> [-sheet N]")
+		return errors.New("usage: dials import <file> [-sheet N] [-target auto|ID]")
 	}
 	file := args[0]
 	fs.Parse(args[1:])
@@ -388,6 +449,21 @@ func importCmd(ctx context.Context, cfg *config.Config, args []string) error {
 		return err
 	}
 	defer d.Close()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	fed, err := openStores(ctx, cfg, d, platform.SystemClock{}, log)
+	if err != nil {
+		return err
+	}
+	defer fed.Close()
+	target := store.Auto
+	if *targetFlag != "auto" {
+		n, err := strconv.Atoi(*targetFlag)
+		if err != nil || fed.Member(n) == nil {
+			return fmt.Errorf("unknown database %q (see `dials stores`)", *targetFlag)
+		}
+		target = n
+	}
+	router := fed.ImportTarget(target)
 	disp := emailcheck.NewDisposable()
 	disp.Reload(ctx, d.R)
 	src, err := importer.OpenSource(file, cfg.TmpDir, *sheet-1)
@@ -396,7 +472,7 @@ func importCmd(ctx context.Context, cfg *config.Config, args []string) error {
 	}
 	defer src.Close()
 	start := time.Now()
-	st, err := (&importer.Importer{DB: d, Disposable: disp}).Run(ctx, src, importer.Options{Progress: func(s importer.Stats) {
+	st, err := (&importer.Importer{DB: d, Disposable: disp}).Run(ctx, src, importer.Options{Target: router, Progress: func(s importer.Stats) {
 		fmt.Fprintf(os.Stderr, "\r%d rows, %d added, %d updated, %d skipped", s.Rows, s.Added, s.Updated, s.Skipped)
 	}})
 	fmt.Fprintln(os.Stderr)
@@ -412,7 +488,12 @@ func importCmd(ctx context.Context, cfg *config.Config, args []string) error {
 		VALUES(?,?,?,?,?,?,?,?,'done','cli',?)`, start.Unix(), filepath.Base(file), size, st.Rows, st.Added, st.Updated, st.Unchanged, st.Skipped, time.Now().Unix())
 	fmt.Printf("done in %s: rows=%d added=%d updated=%d unchanged=%d skipped=%d %v cleaned=%v\n", time.Since(start).Round(time.Millisecond),
 		st.Rows, st.Added, st.Updated, st.Unchanged, st.Skipped, st.Reasons, st.Cleaned)
-	if _, err := seo.Refresh(ctx, d, platform.SystemClock{}, 500, 25); err != nil {
+	for _, m := range fed.Members() {
+		if n := router.Written[m.ID]; n > 0 {
+			fmt.Printf("  %s: %d rows\n", m.Name, n)
+		}
+	}
+	if _, err := seo.Refresh(ctx, d, fed, platform.SystemClock{}, 500, 25); err != nil {
 		return err
 	}
 	fmt.Println("Restart is not needed; the running server picks up changes (caches expire within a minute). Use Superadmin → Imports → Notify to email subscribers.")
@@ -509,7 +590,12 @@ func seoCmd(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	defer d.Close()
-	n, err := seo.Refresh(ctx, d, platform.SystemClock{}, 500, 25)
+	fed, err := openStores(ctx, cfg, d, platform.SystemClock{}, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if err != nil {
+		return err
+	}
+	defer fed.Close()
+	n, err := seo.Refresh(ctx, d, fed, platform.SystemClock{}, 500, 25)
 	if err == nil {
 		fmt.Println("SEO pages:", n)
 	}

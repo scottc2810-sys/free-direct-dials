@@ -21,6 +21,7 @@ import (
 	"markemind/dials/internal/platform"
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 	"markemind/dials/internal/unlock"
 	"markemind/dials/web"
 )
@@ -31,7 +32,7 @@ type App struct {
 	DB         *db.DB
 	Log        *slog.Logger
 	Clock      platform.Clock
-	Search     *search.Service
+	Store      *store.Federation // every contact database (built-in + Supabase/Postgres)
 	Unlock     *unlock.Service
 	Settings   *settings.Store
 	Users      *auth.Users
@@ -153,6 +154,10 @@ func (a *App) routes(m *http.ServeMux) {
 		a.Assets.Serve(w, r, f)
 	})
 	h("GET /ad-frame", a.adFrame)
+	h("GET /ads.txt", a.adsTxt)
+	if b != "" { // ad networks only read ads.txt at the domain root
+		m.HandleFunc("GET /ads.txt", a.adsTxt)
+	}
 	h("GET /healthz", a.healthz)
 	h("GET /readyz", a.readyz)
 

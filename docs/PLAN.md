@@ -26,6 +26,16 @@
 
 ---
 
+## Status (2026-10-16)
+
+Second round, built and tested:
+- **Several contact databases.** Supabase / Postgres stores are added from Superadmin → Databases. Reads are local-first and on demand, and the next database is searched in the background. Keepalive runs every 6 h.
+- **Paging.** Masked preview pages 1–5, with a sponsor break before pages 2–5. Signed-in visitors get keyset pages of their unlocked contacts. Admin lists are paged.
+- **Monetisation.** Google Ad Manager rewarded mode, auto-reveal the moment an ad completes, partner (affiliate) offers, an ads.txt manager.
+- **Look and contact.** Royal-blue theme; WhatsApp default +91 98343 46179.
+
+See REVIEW.md round 2 and MONETIZATION.md.
+
 ## Status (2026-10-15)
 
 All phases 0–10 are **built and tested**. Results: [REVIEW.md](REVIEW.md) (findings) and [PERFORMANCE.md](PERFORMANCE.md) (measured numbers).

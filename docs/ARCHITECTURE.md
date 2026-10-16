@@ -18,6 +18,9 @@
 | Smart Link placements | Used "wherever possible", but always **labelled "Sponsored", `rel="sponsored noopener"`, new tab**: header, sponsor-break button, under results, empty / all-unlocked / daily-limit states, fallback banner in any ad slot without Adsterra code, footer, SEO pages. Each placement toggles in superadmin. Never in emails or on legal / removal / unsubscribe pages. |
 | Superadmin access | **IP allow-list is mandatory** (`ADMIN_ALLOW_CIDRS`; the server refuses to start in prod without it) and enforced in 3 layers: Cloudflare WAF → Caddy `client_ip` → app (404 for everyone else, including `admin.js`/`admin.css`). Then password (argon2id), TOTP and CSRF. |
 | Data uploads | CSV / TSV / semicolon CSV / `.csv.gz` / **Excel `.xlsx`** (streaming, sheet picker), up to 5 GB in resumable 8 MB chunks. Per-column mapping UI with samples, a 200-row **dry run** showing exactly what each row becomes, warnings, and **remembered mappings** per header layout. Profiled against a real Slintel export. |
+| Contact databases (2026-10-16) | **Several stores**: the VPS SQLite database (always first, also the control plane) plus any number of **Supabase / Postgres** databases added in Superadmin → Databases (connection strings sealed with AES-256-GCM). Reads are **local-first and on demand**: a remote store is only queried when no local summary can answer, one store at a time, and the next store is searched **in the background** when the earlier ones have no more matches. Counts show "N+" until it answers. Every store is pinged every 6 h (keeps free projects awake). See §4.6. |
+| Unlock modes (2026-10-16) | Sponsor break (default) · **Google Ad Manager rewarded video** (falls back to the sponsor break when Google has no video) · Smart Link. Contacts are revealed **the moment the ad completes**, with no extra click. Preview pages 2–5 each open after a 5 s sponsor break. Labelled **partner (affiliate) offers** sit in the high-intent states. |
+| Look | Royal blue (`#2a4fd6`, `#7b9bff` at night); WhatsApp keeps its brand green. WhatsApp default **+91 98343 46179**. |
 | Data security | DB files 0600 / dir 0700, `secure_delete=FAST` (erased people are zeroed in-page), **AES-256-GCM encrypted backups** (`BACKUP_KEY`), patched Go toolchain pinned (`go1.27.2`). |
 
 ---
@@ -183,6 +186,28 @@ Matching runs in priority order: `email_key` → `li_key` → `h_key`. The first
 
 ---
 
+### 4.6 Several contact databases (federation)
+
+```
+                   control plane (VPS SQLite): users · sessions · settings · ad tokens · quotas · suppression list
+                                               stores registry · store_dims mirror · user_stores
+                                                        │
+        ┌───────────────────────────────┬───────────────┴───────────────┬──────────────────────────────┐
+  store 0 (VPS SQLite)          store 1 (Supabase #1)          store 2 (Supabase #2)          …
+  contacts · dims · FTS5         schema fdd: contacts · dims ·   (same)
+  unlocked (its contacts)        contact_info (tsvector GIN) · unlocked
+```
+
+- **Each store holds its own contacts and the unlocks of those contacts.** A contact lives in exactly one store; public ids are `storeID<<40 | localID` (exact in JavaScript).
+- **Local-first, on demand.** After every import or removal, a remote store's per-value counts and headline stats are copied into `store_dims` / `stores.stats` (the *mirror*). Totals, single-filter counts, plain dropdowns, stats, SEO labels and the decision "this store can't match" come from the mirror, with no network call. Remote answers that must be asked (multi-filter counts, facets, rows) are memoised per store version.
+- **Background search.** Preview rows are taken from store 0, then the next store only as far as the page reaches. When the stores so far are used up, the next is searched in the background (at most two background searches at a time). A request waits 1.2 s, then answers with what it has, marked `pending`. The page shows "12,340+ … Searching more databases" and polls until it is complete (pending answers are cached for ~1.5 s only).
+- **Claims** go store by store in order. A store that runs out for a visitor and filter is remembered (until its data changes) and skipped next time, and the next store is warmed in the background. The ad was already watched, so a claim waits for whatever store it needs.
+- **Personal list.** `user_stores` records which stores hold each user's unlocks and their batch range. The keyset-paged view (batch desc, store, id) asks only those stores, newest batches first, and leaves a store whose newest batch is older than the page for the next page.
+- **Imports** route through `store.Router`: identities already present in another store merge there (`ExistingKeys`, skipped for empty stores); new people go to the chosen store, or with *Auto* to the first writable store under 90 % of its quota. Uploads and removals refuse to run while a store is unreachable, so nothing can be duplicated or left behind. Removal suppression keys are written to the control plane *before* deleting.
+- **Postgres store** (`internal/store/postgres.go`): pgx pool of 4, no named prepared statements (works through Supavisor in session or transaction mode), TLS mandatory, 8 s query timeout, bounded concurrency. Batches upsert with a handful of `unnest()` statements and the same merge rules as SQLite (`importer.Merge`). Identity keys are unique constraints checked at commit. Keyword and technology search use `tsvector` columns built from the app's own tokenizer (`filter.IndexTokens` / `TechTokens`), queried as literal prefix lexemes, so results match SQLite FTS5.
+- **Failure handling.** A store that errors is skipped with exponential back-off (5 s → 5 min); answers become `partial`. The 6-hourly monitor reconnects it, writes a keepalive, refreshes size, contacts and mirror, and alerts at 80 % of quota or when it is down.
+- **Verified** by `internal/store/store_test.go`: three SQLite stores give exactly the same counts, facets, preview pages, claims and paging as one database holding the same rows. Further tests cover cross-store re-import (0 added) and removal reaching every store, plus partial results and the circuit breaker, mirror-only answers (0 remote calls), and pending/background completion. The same suite runs against a real Postgres when `DIALS_TEST_PG_DSN` is set.
+
 ## 5. Filter engine — accuracy contract
 
 | Rule | Implementation |
@@ -216,7 +241,9 @@ filters → count + masked preview →  email → Turnstile → checks:         
                                                                                   matching contacts ORDER BY id → batch=max+1
 ```
 
-- **Never repeats, never double-hands.** One writer connection, a per-user mutex, and the `PRIMARY KEY(user_id, contact_id)` together guarantee it. Acceptance tests 6 and 7 verify this.
+- **Reveal on completion.** Sponsor break: the claim fires automatically when the visible-time countdown ends. Google rewarded (GPT `defineOutOfPageSlot(..., REWARDED)`): the visitor opts in, and the claim fires on `rewardedSlotGranted`. If GPT has no slot, no fill, or is blocked, or nothing arrives within 8 s, the same token becomes a sponsor break. The server floor for rewarded tokens is 5 s (web rewarded has no server-side verification).
+- **Preview paging.** `/api/preview?page=0..4` returns 10 masked rows per page, with the depth set by Limits → preview pages. Pages after the first open after a short sponsor break (once per page per tab). Signed-in visitors page through their unlocked contacts with keyset cursors (`/api/me/view?after=`), 50 per page.
+- **Never repeats, never double-hands.** A per-user mutex, the `PRIMARY KEY(user_id, contact_id)` in each store, and the fact that each contact lives in one store together guarantee it. Acceptance tests 6 and 7 verify this, and so does the federation test across stores.
 - **Anti-scrape:** each user gets at most N ads per day (admin setting, default 50 = 500 contacts). Claims also have a per-IP daily cap and a minimum interval of `min_s` between them.
 - **Ad blockers:** policy is set by the admin (`allow` | `nudge` (default) | `require`). Detection uses a `no-cors` fetch to the configured ad script host.
 - **Ad slots** (top banner 90/50 px, in-content 250 px, sponsor break 250 px, footer) have fixed heights, so they cause no layout shift. Snippets are pasted in admin and rendered inside **sandboxed `srcdoc` iframes** by default. Admin can switch a slot to *direct* when fill rates need it. A global *Social Bar* snippet can only run direct and has an explicit warning.
@@ -271,6 +298,8 @@ Capabilities: stats dashboard, chunked resumable CSV upload (**works past Cloudf
 | `/`, `/country/*`, `/industry/*`, legal pages, `sitemap.xml`, `llms.txt` | `public, max-age=0, s-maxage=600` | Eligible for cache; purge after import |
 | `/api/config`, `/api/stats`, `/api/facets`, `/api/preview` | `public, max-age=0, s-maxage=60` | Eligible for cache (query string in key) |
 | `/api/me/*`, `/api/ad/*`, `/api/auth/*`, admin | `private, no-store` | Bypass |
+
+Federated answers carry their completeness: *complete* (5 min LRU / 60 s CDN), *partial* because a store is down (20 s / 20 s), and *pending* because a store is still being searched (≈1.5 s LRU / 1 s CDN, no stale-while-revalidate, so polls reach the server).
 
 Public responses **never** read cookies or emit `Set-Cookie`. A test enforces this, so personal data can't leak through the CDN. On the origin, a byte-bounded LRU (30 MB) is keyed by `dataset_version + canonical filter` and backed by singleflight, so a burst of identical requests runs one query. Imports bump `dataset_version`, which invalidates the cache instantly.
 

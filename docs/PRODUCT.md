@@ -14,8 +14,8 @@ B2B sellers, SDRs, founders and recruiters, mostly in India and the US, at a des
 - Real rows with names, titles, companies and locations, with contact details as redaction bars until unlocked.
 - After unlocking: real emails and phones, copy buttons, CSV export, and a NEW batch on top.
 
-## Direction: "Green-bar call sheet"
-The visual world comes from the printed lead lists and call sheets salespeople worked from: continuous-form paper with alternating pale-green bands, ruled lines, tabular figures, line numbers. Masked values are **redaction bars**. Newly unlocked rows get a **highlighter sweep**, the one authored motion, and stay highlighter-yellow with a NEW tag, the way a rep marks fresh leads. A single "dial-tone green" carries actions and state. Light by default for daytime office use, with a "night shift" dark theme.
+## Direction: "Blue-bar call sheet" (royal blue)
+The visual world comes from the printed lead lists and call sheets salespeople worked from: continuous-form paper with alternating pale-blue bands, ruled lines, tabular figures, line numbers. Masked values are **redaction bars**. Newly unlocked rows get a **highlighter sweep**, the one authored motion, and stay highlighter-yellow with a NEW tag, the way a rep marks fresh leads. A single royal blue (`#2a4fd6`, lifted to `#7b9bff` at night) carries actions and state. WhatsApp keeps its own brand green because people recognise it. Light by default for daytime office use, with a "night shift" dark theme.
 
 Refused category defaults: gradient SaaS hero, icon-card feature grid, hero-metric block, eyebrow labels, glassmorphism, modal-first flows (sign-in is inline in the unlock dock).
 

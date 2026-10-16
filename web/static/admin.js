@@ -65,8 +65,8 @@
 
   // ---------- shell & routing ----------
   const VIEWS = [
-    ['Overview', [['dashboard', 'Dashboard'], ['upload', 'Upload data'], ['imports', 'Imports & notify']]],
-    ['Money', [['ads', 'Ads & Smart Link'], ['donations', 'Donations'], ['whatsapp', 'WhatsApp']]],
+    ['Overview', [['dashboard', 'Dashboard'], ['upload', 'Upload data'], ['imports', 'Imports & notify'], ['databases', 'Databases']]],
+    ['Money', [['ads', 'Ads & Smart Link'], ['affiliates', 'Partner offers'], ['donations', 'Donations'], ['whatsapp', 'WhatsApp']]],
     ['Site', [['limits', 'Limits'], ['site', 'Site & legal'], ['email', 'Email']]],
     ['Data safety', [['removals', 'Removals'], ['blocklist', 'Blocklist'], ['users', 'Users'], ['audit', 'Audit log'], ['system', 'System']]],
   ];
@@ -100,10 +100,19 @@
 
   async function start() {
     FIELDS = await api('/api/fields');
-    try { pendingRemovals = (await api('/api/removals?status=pending')).removals.length; } catch { pendingRemovals = 0; }
+    try { const x = await api('/api/removals?status=pending'); pendingRemovals = (x.paging || {}).total || x.removals.length; } catch { pendingRemovals = 0; }
     shell(); route();
   }
   window.addEventListener('hashchange', () => CSRF && route());
+
+  // pager renders "Previous · Page x of y · Next" for an admin list (paging = {page, pages, total})
+  function pager(pg, go) {
+    if (!pg || pg.pages <= 1) return null;
+    return h('div', { class: 'actions mt' },
+      h('button', { class: 'btn btn-small', type: 'button', disabled: pg.page === 0, onclick: () => go(pg.page - 1) }, 'Previous'),
+      h('span', { class: 'note' }, 'Page ' + (pg.page + 1) + ' of ' + pg.pages + ' · ' + fmt(pg.total) + ' total'),
+      h('button', { class: 'btn btn-small', type: 'button', disabled: pg.page >= pg.pages - 1, onclick: () => go(pg.page + 1) }, 'Next'));
+  }
 
   // ---------- dashboard ----------
   const stat = (v, l) => h('div', { class: 'stat' }, h('b', {}, v), h('span', {}, l));
@@ -115,7 +124,7 @@
       h('div', { class: 'stats' },
         stat(fmt(hl.contacts), 'contacts'), stat(fmt(hl.with_email), 'with email'), stat(fmt(hl.with_phone), 'with phone'), stat(fmt(hl.countries), 'countries'),
         stat(fmt(u.total), 'users'), stat(fmt(u.subscribed), 'subscribed'), stat(fmt(u.today), 'sign-ups today'), stat(fmt(u.active_7d), 'active 7 days'),
-        stat(fmt(ul.ads_today), 'sponsor breaks today'), stat(fmt(ul.users_today), 'unlocking users today'), stat(fmt(ul.total_unlocked), 'contacts unlocked (all time)'),
+        stat(fmt(ul.ads_today), 'sponsor breaks today'), stat(fmt(ul.users_today), 'unlocking users today'), stat(fmt(ul.breaks_total), 'sponsor breaks (all time)'),
         stat(fmt(ob.queued), 'emails queued'), stat(s.disk.pct.toFixed(0) + '%', 'disk used'), stat(bytes(s.db.bytes), 'database'),
         stat(bytes(s.db.wal_bytes), 'WAL'), stat(s.runtime.heap_mb + ' MB', 'heap')),
       h('div', { class: 'card' }, h('h2', {}, 'Quick actions'), h('div', { class: 'actions' },
@@ -124,6 +133,7 @@
         h('button', { class: 'btn', type: 'button', onclick: purge }, 'Purge caches'),
         h('button', { class: 'btn', type: 'button', onclick: () => runJob('seo') }, 'Rebuild SEO pages'),
         h('a', { class: 'btn', href: '#site' }, s.read_only ? 'Turn off maintenance mode' : 'Maintenance mode'))),
+      h('div', { class: 'card' }, h('h2', {}, 'Contact databases'), storesTable(s.stores || [], false), h('div', { class: 'actions mt' }, h('a', { class: 'btn', href: '#databases' }, 'Manage databases'))),
       h('div', { class: 'card' }, h('h2', {}, 'Email quota today'), usageTable(ob)),
     ];
   }
@@ -253,12 +263,16 @@
         h('td', {}, row.skip ? h('span', { class: 'skip' }, 'skipped: ' + row.skip.replace('_', ' ')) : 'import', (row.notes || []).map(n => h('div', { class: 'notes' }, n)))))));
     const attest = h('input', { type: 'checkbox', id: 'attest' });
     const remember = h('input', { type: 'checkbox', id: 'remember', checked: true });
+    let stores = [];
+    try { stores = (await api('/api/stores')).stores; } catch { stores = []; }
+    const target = h('select', { class: 'input', id: 'target' }, h('option', { value: 'auto' }, 'Auto: the first database with room (recommended)'),
+      stores.filter(x => x.write && x.read).map(x => h('option', { value: String(x.id), disabled: x.state === 'down' }, x.name + ' (' + x.kind + (x.cap_bytes ? ', ' + x.pct + '% full' : '') + (x.state === 'down' ? ', unreachable' : '') + ')')));
     const go = h('button', { class: 'btn btn-primary', type: 'button' }, 'Import the whole file');
     go.addEventListener('click', async () => {
       if (!attest.checked) { toast('Please confirm you have the right to publish this data.'); return; }
       go.classList.add('loading');
       try {
-        const res = await api('/api/uploads/' + upState.id + '/import', { method: 'POST', body: { sheet: upState.sheet, mapping: upState.mapping, attest: true, remember: remember.checked, signature: upState.signature } });
+        const res = await api('/api/uploads/' + upState.id + '/import', { method: 'POST', body: { sheet: upState.sheet, mapping: upState.mapping, attest: true, remember: remember.checked, signature: upState.signature, target: target.value } });
         try { sessionStorage.clear(); } catch { /* ignore */ }
         toast('Import #' + res.import_id + ' started'); location.hash = '#imports';
       } catch (e) { toast(e.message); } finally { go.classList.remove('loading'); }
@@ -272,13 +286,17 @@
       h('div', { class: 'form mt' },
         h('label', { class: 'check' }, attest, h('span', {}, 'I confirm we have the right to publish these contacts, and people can remove themselves via the removal page.')),
         h('label', { class: 'check' }, remember, h('span', {}, 'Remember this mapping for files with the same columns')),
+        h('div', { class: 'field' }, h('label', { for: 'target' }, 'Store new contacts in'), target,
+          h('span', { class: 'hint' }, 'People already in any database are merged where they are, never duplicated. Auto moves on to the next database when one passes 90% of its quota.')),
         h('div', { class: 'actions' }, go, h('button', { class: 'btn', type: 'button', onclick: () => { $('#dry').remove(); stepOn(1); } }, 'Change mapping')))));
     $('#dry').scrollIntoView({ behavior: 'smooth' });
   }
 
   // ---------- imports & notify ----------
   async function vImports(alive) {
-    const r = await api('/api/imports');
+    let page = 0;
+    const pagerBox = h('div');
+    const r = await api('/api/imports?page=0');
     const tbody = h('tbody');
     const fill = list => tbody.replaceChildren(...list.map(u => {
       const live = u.live;
@@ -286,16 +304,17 @@
       return h('tr', {}, h('td', { class: 'num' }, '#' + u.id), h('td', { class: 'wrapcell' }, u.filename, h('div', { class: 'note' }, when(u.ts) + ' · ' + bytes(u.bytes) + ' · ' + u.by)),
         h('td', {}, h('span', { class: 'pill ' + u.status }, u.status), u.error ? h('div', { class: 'note' }, u.error) : null),
         h('td', { class: 'num' }, fmt(live ? live.rows : u.rows)), h('td', { class: 'num' }, fmt(live ? live.added : u.added)), h('td', { class: 'num' }, fmt(live ? live.updated : u.updated)),
-        h('td', { class: 'num' }, fmt(u.unchanged)), h('td', { class: 'num', title: reasons }, fmt(live ? live.skipped : u.skipped)),
+        h('td', { class: 'num' }, fmt(u.unchanged)), h('td', { class: 'num', title: reasons }, fmt(live ? live.skipped : u.skipped)), h('td', { class: 'wrapcell note' }, u.target || '—'),
         h('td', {}, u.status === 'running' ? h('button', { class: 'btn btn-small', type: 'button', onclick: () => api('/api/imports/' + u.id + '/cancel', { method: 'POST', body: {} }).then(() => toast('Cancelling…')) }, 'Cancel')
           : u.notified ? h('span', { class: 'note' }, 'Notified (campaign #' + u.notified + ')')
             : u.status === 'done' && u.added > 0 ? h('button', { class: 'btn btn-small btn-primary', type: 'button', onclick: () => notifyDialog(u) }, 'Notify subscribers') : h('span', { class: 'note' }, '—')));
     }));
-    fill(r.imports);
-    (async () => { while (alive()) { await sleep(2500); if (!alive()) return; try { const x = await api('/api/imports'); if (alive()) fill(x.imports); if (!x.running) { await sleep(5000); } } catch { return; } } })();
+    const show = x => { fill(x.imports); pagerBox.replaceChildren(pager(x.paging, async p => { page = p; show(await api('/api/imports?page=' + p)); }) || ''); };
+    show(r);
+    (async () => { while (alive()) { await sleep(2500); if (!alive()) return; try { const x = await api('/api/imports?page=' + page); if (alive()) show(x); if (!x.running) { await sleep(5000); } } catch { return; } } })();
     return [head('Imports & notify', h('a', { class: 'btn btn-primary', href: '#upload' }, 'Upload data')),
       h('div', { class: 'card' }, h('p', { class: 'hint' }, 'Imports run one at a time in the background; you can leave this page. Re-importing a file never creates duplicates.'),
-        h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['#', 'File', 'Status', 'Rows', 'New', 'Updated', 'Unchanged', 'Skipped', ''].map(t => h('th', {}, t)))), tbody)))];
+        h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['#', 'File', 'Status', 'Rows', 'New', 'Updated', 'Unchanged', 'Skipped', 'Stored in', ''].map(t => h('th', {}, t)))), tbody)), pagerBox)];
   }
   async function notifyDialog(u) {
     const ob = await api('/api/outbox');
@@ -377,13 +396,41 @@
         name === 'global' ? null : h('a', { class: 'note', href: BASE + '/ad-frame?slot=' + name, target: '_blank', rel: 'noopener' }, 'Preview saved slot ↗'));
     });
     return [
-      input({ k: 'mode', t: 'select', l: 'Unlock mode', opts: [['sponsor', 'Sponsor break (recommended)'], ['smartlink', 'Smart Link in a new tab']] }, o),
+      input({ k: 'mode', t: 'select', l: 'Unlock mode', opts: [['sponsor', 'Sponsor break (recommended)'], ['gpt_rewarded', 'Google rewarded video (Ad Manager), sponsor break as fallback'], ['smartlink', 'Smart Link in a new tab']] }, o),
+      input({ k: 'gpt_ad_unit', t: 'text', l: 'Google Ad Manager rewarded ad unit', ph: '/1234567/fdd_rewarded', hint: 'Ad Manager → Inventory → Ad units → a "Rewarded" unit. Its full path, starting with your network code. Contacts unlock the moment Google grants the reward; if Google has no video, visitors get the sponsor break instead.' }, o),
       input({ k: 'smartlink', t: 'url', l: 'Smart Link URL', hint: 'Your Adsterra Smart Link, used by every placement below.' }, o),
       h('div', { class: 'row2' }, input({ k: 'min_seconds', t: 'number', l: 'Break length (seconds)', min: 5, max: 60 }, o),
         input({ k: 'adblock', t: 'select', l: 'Ad blockers', opts: [['nudge', 'Nudge (recommended)'], ['allow', 'Allow silently'], ['require', 'Require ads to unlock']] }, o)),
       input({ k: 'probe_url', t: 'url', l: 'Ad-block probe URL (optional)', hint: 'Any script URL from your Adsterra code (e.g. the invoke.js link). If it fails to load, a blocker is on.' }, o),
       h('div', { class: 'row2' }, input({ k: 'sponsor_label', t: 'text', l: 'Disclosure label', hint: 'Required by ad and search policies; can be reworded, not removed.' }, o), input({ k: 'sponsor_cta', t: 'text', l: 'Smart Link button text' }, o)),
-      places, ...slots];
+      h('fieldset', {}, h('legend', {}, 'Preview pages'),
+        input({ k: 'preview_gate', t: 'bool', l: 'A short sponsor break opens each further page of masked rows', hint: '(page 1 is free; each later page once per visit)' }, o),
+        input({ k: 'preview_seconds', t: 'number', l: 'Preview break length (seconds, 0 = off)', min: 0, max: 30 }, o)),
+      places, ...slots,
+      h('fieldset', {}, h('legend', {}, 'ads.txt'),
+        input({ k: 'ads_txt', t: 'textarea', l: 'ads.txt lines', rows: '6', max: '20000', hint: 'Paste the lines each network gives you (Google AdSense / Ad Manager, Adsterra, Monetag…). Served at /ads.txt on this server; the main site must serve the same file at the domain root (RUNBOOK → ads.txt).' }, o),
+        h('a', { class: 'note', href: '/ads.txt', target: '_blank', rel: 'noopener' }, 'Open /ads.txt ↗'))];
+  });
+
+  const AFF_LABEL = { results: 'Under the results', dock: 'In the unlock box', empty: 'All-unlocked, daily-limit and no-results states', break: 'During sponsor breaks', footer: 'Footer link', seo: 'SEO landing pages' };
+  const vAffiliates = () => settingsView('affiliates', 'Partner offers (affiliate links)', 'Your affiliate links (Apollo, Lusha, Hunter…) shown as clearly labelled partner cards. Paste the tracking link from each programme; the most engaged spots are the all-unlocked and daily-limit states, where people want more data.', o => {
+    o.items = o.items || [];
+    const list = h('div', { class: 'form' });
+    const render = () => list.replaceChildren(...o.items.map((it, i) => {
+      it.placements = it.placements || [];
+      const pl = h('div', { class: 'checks' }, (FIELDS.aff_placements || []).map(p => {
+        const c = h('input', { type: 'checkbox', checked: it.placements.includes(p) });
+        c.addEventListener('change', () => { it.placements = c.checked ? [...new Set([...it.placements, p])] : it.placements.filter(x => x !== p); });
+        return h('label', { class: 'check' }, c, h('span', {}, AFF_LABEL[p] || p));
+      }));
+      return h('div', { class: 'wallet' }, h('div', { class: 'row2' }, input({ k: 'name', t: 'text', l: 'Brand' }, it), input({ k: 'cta', t: 'text', l: 'Button text' }, it)),
+        input({ k: 'text', t: 'text', l: 'One-line pitch' }, it), input({ k: 'url', t: 'url', l: 'Your affiliate / tracking link (https)' }, it),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Show in'), pl),
+        h('div', { class: 'row2' }, input({ k: 'weight', t: 'number', l: 'Weight (1–100, how often when several fit)', min: 1, max: 100 }, it), input({ k: 'enabled', t: 'bool', l: 'Live on the site' }, it)),
+        h('div', {}, h('button', { class: 'btn btn-small', type: 'button', onclick: () => { o.items.splice(i, 1); render(); } }, 'Remove offer')));
+    }), h('div', {}, h('button', { class: 'btn btn-small', type: 'button', onclick: () => { o.items.push({ name: '', text: '', cta: 'Learn more', url: 'https://', placements: ['empty'], weight: 50, enabled: false }); render(); } }, 'Add partner offer')));
+    render();
+    return [input({ k: 'enabled', t: 'bool', l: 'Show partner offers' }, o), input({ k: 'label', t: 'text', l: 'Disclosure label', hint: 'Shown on every card (FTC / ASCI). Can be reworded, not removed.' }, o), list];
   });
 
   const vDonations = () => settingsView('donations', 'Donations', 'Each method appears on the site only when enabled and filled in. Crypto addresses are checksum-validated (EIP-55) so a typo can\'t lose funds.', (o, r) => {
@@ -424,7 +471,8 @@
 
   const vLimits = () => settingsView('limits', 'Limits', 'Fair use and anti-scraping. Daily limits reset at midnight UTC.', o => [
     h('div', { class: 'row2' }, input({ k: 'contacts_per_ad', t: 'number', l: 'Contacts per sponsor break', min: 1, max: 50 }, o), input({ k: 'max_ads_per_day', t: 'number', l: 'Breaks per user per day', min: 1, max: 1000 }, o)),
-    h('div', { class: 'row2' }, input({ k: 'max_ads_per_day_ip', t: 'number', l: 'Breaks per network (IP) per day', min: 1, max: 10000 }, o), input({ k: 'view_cap', t: 'number', l: 'Rows shown on screen (export has all)', min: 50, max: 2000 }, o)),
+    h('div', { class: 'row2' }, input({ k: 'max_ads_per_day_ip', t: 'number', l: 'Breaks per network (IP) per day', min: 1, max: 10000 }, o), input({ k: 'page_size', t: 'number', l: 'Unlocked rows per page (signed-in)', min: 10, max: 200 }, o)),
+    input({ k: 'preview_pages', t: 'number', l: 'Free preview pages per filter (10 masked rows each)', min: 1, max: 10 }, o),
     input({ k: 'signups_enabled', t: 'bool', l: 'Allow new sign-ups' }, o), input({ k: 'require_business_email', t: 'bool', l: 'Business emails only', hint: '(blocks Gmail, Yahoo, Outlook…)' }, o),
     input({ k: 'use_reacher', t: 'bool', l: 'Verify mailboxes with Reacher', hint: '(needs REACHER_URL on the server)' }, o)]);
 
@@ -454,7 +502,8 @@
   // ---------- removals, blocklist, users, audit, system ----------
   async function vRemovals() {
     const [pend, done] = await Promise.all([api('/api/removals?status=pending'), api('/api/removals?status=done')]);
-    pendingRemovals = pend.removals.length;
+    pendingRemovals = (pend.paging || {}).total || pend.removals.length;
+    const doneBox = h('div');
     const kind = h('select', { class: 'input' }, [['email', 'Email'], ['linkedin', 'LinkedIn URL'], ['phone', 'Phone']].map(([v, l]) => h('option', { value: v }, l)));
     const val = h('input', { class: 'input', placeholder: 'Value to remove' });
     const rm = h('button', { class: 'btn btn-primary', type: 'button' }, 'Delete & block');
@@ -470,7 +519,8 @@
     const tbl = list => h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['#', 'Type', 'Value', 'Note', 'Received', ''].map(t => h('th', {}, t)))), h('tbody', {}, rows(list))));
     return [head('Removals'), h('div', { class: 'card' }, h('h2', {}, 'Waiting (' + pend.removals.length + ')'), h('p', { class: 'hint' }, 'Requests from people without access to the listed email. Legal deadline: 30 days. Self-service email removals happen instantly and appear under Done.'), pend.removals.length ? tbl(pend.removals) : h('p', { class: 'muted' }, 'Nothing waiting.')),
       h('div', { class: 'card' }, h('h2', {}, 'Remove a contact now'), h('div', { class: 'row2' }, kind, val), h('div', { class: 'actions mt' }, rm)),
-      h('div', { class: 'card' }, h('h2', {}, 'Done (latest 200)'), tbl(done.removals))];
+      (() => { const show = x => doneBox.replaceChildren(tbl(x.removals), pager(x.paging, async p => show(await api('/api/removals?status=done&page=' + p))) || ''); show(done);
+        return h('div', { class: 'card' }, h('h2', {}, 'Done'), doneBox); })()];
   }
 
   async function vBlocklist() {
@@ -494,23 +544,94 @@
   async function vUsers() {
     const q = h('input', { class: 'input', type: 'search', placeholder: 'Search by email' });
     const list = h('tbody');
+    const pagerBox = h('div');
+    let page = 0;
     const load = async () => {
-      const r = await api('/api/users?q=' + encodeURIComponent(q.value));
-      list.replaceChildren(...r.users.map(u => h('tr', {}, h('td', { class: 'wrapcell' }, u.email), h('td', {}, when(u.created)), h('td', {}, when(u.last_seen)), h('td', { class: 'num' }, fmt(u.unlocked)),
+      const r = await api('/api/users?q=' + encodeURIComponent(q.value) + '&page=' + page);
+      pagerBox.replaceChildren(pager(r.paging, p => { page = p; load(); }) || '');
+      list.replaceChildren(...r.users.map(u => h('tr', {}, h('td', { class: 'wrapcell' }, u.email), h('td', {}, when(u.created)), h('td', {}, when(u.last_seen)), h('td', { class: 'num' }, fmt(u.breaks)),
         h('td', {}, [u.subscribed ? 'subscribed' : 'unsubscribed', u.bounced ? 'bounced' : '', u.blocked ? 'BLOCKED' : ''].filter(Boolean).join(' · ')),
         h('td', {}, h('div', { class: 'actions' },
           h('button', { class: 'btn btn-small', type: 'button', onclick: async () => { await api('/api/users/' + u.id + '/block', { method: 'POST', body: { blocked: !u.blocked } }); load(); } }, u.blocked ? 'Unblock' : 'Block'),
-          h('button', { class: 'btn btn-small', type: 'button', onclick: async () => { if (!confirm('Permanently delete ' + u.email + ' and their unlock history?')) return; await api('/api/users/' + u.id, { method: 'DELETE' }); load(); } }, 'Delete'))))));
+          h('button', { class: 'btn btn-small', type: 'button', onclick: async () => { if (!confirm('Permanently delete ' + u.email + ' and their unlock history?')) return; try { await api('/api/users/' + u.id, { method: 'DELETE' }); load(); } catch (e) { toast(e.message); } } }, 'Delete'))))));
     };
-    let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(load, 250); });
+    let t; q.addEventListener('input', () => { clearTimeout(t); page = 0; t = setTimeout(load, 250); });
     await load();
-    return [head('Users'), h('div', { class: 'card' }, q, h('div', { class: 'tbl-scroll mt' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['Email', 'Joined', 'Last seen', 'Unlocked', 'Status', ''].map(x => h('th', {}, x)))), list)))];
+    return [head('Users'), h('div', { class: 'card' }, q, h('div', { class: 'tbl-scroll mt' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['Email', 'Joined', 'Last seen', 'Sponsor breaks', 'Status', ''].map(x => h('th', {}, x)))), list)), pagerBox)];
   }
 
   async function vAudit() {
-    const r = await api('/api/audit');
-    return [head('Audit log'), h('div', { class: 'card' }, h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'IP', 'Action', 'Detail'].map(x => h('th', {}, x)))),
-      h('tbody', {}, r.audit.map(a => h('tr', {}, h('td', {}, when(a.ts)), h('td', {}, a.actor), h('td', {}, a.ip), h('td', {}, a.action), h('td', { class: 'wrapcell' }, a.detail)))))))];
+    const body = h('tbody'), more = h('div', { class: 'actions mt' });
+    const load = async before => {
+      const r = await api('/api/audit' + (before ? '?before=' + before : ''));
+      body.append(...r.audit.map(a => h('tr', {}, h('td', {}, when(a.ts)), h('td', {}, a.actor), h('td', {}, a.ip), h('td', {}, a.action), h('td', { class: 'wrapcell' }, a.detail))));
+      more.replaceChildren(r.next ? h('button', { class: 'btn btn-small', type: 'button', onclick: () => load(r.next) }, 'Load older entries') : h('span', { class: 'note' }, 'Start of the log.'));
+    };
+    await load(0);
+    return [head('Audit log'), h('div', { class: 'card' }, h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'IP', 'Action', 'Detail'].map(x => h('th', {}, x)))), body)), more)];
+  }
+
+  // ---------- contact databases (built-in + Supabase / Postgres) ----------
+  function storesTable(stores, manage, reload) {
+    return h('div', { class: 'tbl-scroll' }, h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['#', 'Database', 'State', 'Contacts', 'Size', 'Quota', 'Last check', manage ? '' : null].filter(x => x !== null).map(x => h('th', {}, x)))),
+      h('tbody', {}, stores.map(x => h('tr', {},
+        h('td', { class: 'num' }, x.id), h('td', { class: 'wrapcell' }, h('b', {}, x.name), h('div', { class: 'note' }, x.kind === 'local' ? 'SQLite on this server' : x.kind + (x.host ? ' · ' + x.host : ''))),
+        h('td', {}, h('span', { class: 'pill ' + (x.state === 'ok' ? 'done' : x.state === 'down' ? 'failed' : 'pending') }, x.state), x.last_err ? h('div', { class: 'note' }, x.last_err) : null),
+        h('td', { class: 'num' }, fmt(x.contacts)), h('td', { class: 'num' }, bytes(x.bytes)),
+        h('td', { class: 'num' }, x.cap_bytes ? x.pct + '% of ' + bytes(x.cap_bytes) : '—'), h('td', {}, when(x.last_ok)),
+        manage ? h('td', {}, storeActions(x, reload)) : null)))));
+  }
+  function storeActions(x, reload) {
+    const quota = h('input', { class: 'input', type: 'number', min: 0, value: String(Math.round(x.cap_bytes / (1 << 20))), 'aria-label': 'Quota MB' });
+    const name = h('input', { class: 'input', value: x.name, 'aria-label': 'Name' });
+    const rd = h('input', { type: 'checkbox', checked: x.read, disabled: x.id === 0 }), wr = h('input', { type: 'checkbox', checked: x.write });
+    const save = h('button', { class: 'btn btn-small btn-primary', type: 'button' }, 'Save');
+    save.addEventListener('click', async () => {
+      try { await api('/api/stores/' + x.id, { method: 'POST', body: { name: name.value, read: rd.checked, write: wr.checked, quota_mb: +quota.value || 0 } }); toast('Saved'); reload(); } catch (e) { toast(e.message); }
+    });
+    const detach = x.id === 0 ? null : h('button', { class: 'btn btn-small', type: 'button', onclick: async () => {
+      if (!confirm('Detach "' + x.name + '"? Its data stays in that database; adding the same connection string later re-attaches it.')) return;
+      try { await api('/api/stores/' + x.id, { method: 'DELETE' }); toast('Detached'); reload(); } catch (e) { toast(e.message); }
+    } }, 'Detach');
+    return h('div', { class: 'form' }, name, h('label', { class: 'check' }, rd, h('span', {}, 'Serve searches')), h('label', { class: 'check' }, wr, h('span', {}, 'Receive uploads')),
+      x.id === 0 ? h('span', { class: 'hint' }, 'Quota: managed by the disk guard') : h('div', { class: 'field' }, h('label', {}, 'Quota (MB)'), quota), h('div', { class: 'actions' }, save, detach));
+  }
+  async function vDatabases() {
+    const box = h('div');
+    const load = async () => { const r = await api('/api/stores'); box.replaceChildren(storesTable(r.stores, true, load)); };
+    await load();
+    const name = h('input', { class: 'input', id: 'db-name', placeholder: 'Supabase 1 (Mumbai)' });
+    const dsn = h('input', { class: 'input', id: 'db-dsn', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'postgresql://postgres.xxxx:PASSWORD@aws-0-ap-south-1.pooler.supabase.com:5432/postgres' });
+    const quota = h('input', { class: 'input', id: 'db-quota', type: 'number', min: 0, value: '500' });
+    const out = h('div', { class: 'hint' });
+    const test = h('button', { class: 'btn', type: 'button' }, 'Test connection');
+    const add = h('button', { class: 'btn btn-primary', type: 'button' }, 'Add database');
+    test.addEventListener('click', async () => {
+      out.textContent = 'Connecting…'; test.classList.add('loading');
+      try { const p = await api('/api/stores/test', { method: 'POST', body: { kind: 'postgres', dsn: dsn.value } });
+        out.textContent = 'Connected in ' + p.latency_ms + ' ms · ' + p.server + ' · ' + bytes(p.bytes) + ' used' + (p.has_schema ? ' · already has Free Direct Dials data (' + fmt(p.contacts) + ' contacts): adding it re-attaches them' : ' · empty: the tables are created when you add it'); }
+      catch (e) { out.textContent = e.message; } finally { test.classList.remove('loading'); }
+    });
+    add.addEventListener('click', async () => {
+      add.classList.add('loading');
+      try { await api('/api/stores', { method: 'POST', body: { name: name.value, kind: 'postgres', dsn: dsn.value, quota_mb: +quota.value || 0 } });
+        toast('Database added'); dsn.value = ''; name.value = ''; out.textContent = ''; load(); }
+      catch (e) { out.textContent = e.message; } finally { add.classList.remove('loading'); }
+    });
+    const check = h('button', { class: 'btn', type: 'button', onclick: async () => { try { const r = await api('/api/stores/check', { method: 'POST', body: {} }); toast(r.warnings.length ? r.warnings.join(' · ') : 'Every database answered'); load(); } catch (e) { toast(e.message); } } }, 'Ping all now');
+    return [head('Contact databases', check),
+      h('div', { class: 'card' }, h('p', { class: 'hint' }, 'Searches ask this server first, then each database in the order added, and only when needed: totals, single filters and plain dropdowns come from a local summary. When one database has no more matches, the next is searched in the background. Every database is pinged every 6 hours so free Supabase projects never pause.'), box),
+      h('div', { class: 'card' }, h('h2', {}, 'Add a Supabase / Postgres database'),
+        h('ol', { class: 'hint' }, h('li', {}, 'In Supabase: Project → Connect → "Session pooler" → copy the URI (it works over IPv4).'),
+          h('li', {}, 'Replace [YOUR-PASSWORD] with the database password (Project Settings → Database).'),
+          h('li', {}, 'Paste it below, Test, then Add. The tables are created in their own schema (fdd), invisible to Supabase\'s public APIs.')),
+        h('div', { class: 'form' }, h('div', { class: 'row2' }, h('div', { class: 'field' }, h('label', { for: 'db-name' }, 'Name'), name), h('div', { class: 'field' }, h('label', { for: 'db-quota' }, 'Quota (MB)'), quota, h('span', { class: 'hint' }, 'Free plan: 500 MB. New uploads move on at 90%.'))),
+          h('div', { class: 'field' }, h('label', { for: 'db-dsn' }, 'Connection string'), dsn, h('span', { class: 'hint' }, 'Stored encrypted (AES-256-GCM) on this server; never shown again or sent to the browser.')),
+          h('div', { class: 'actions' }, test, add), out)),
+      h('div', { class: 'card' }, h('h2', {}, 'Good to know'), h('ul', { class: 'hint' },
+        h('li', {}, 'Supabase allows two free projects per account. Using many accounts to get more breaks their terms; upgrade one project (Pro: 8 GB) when you need more room.'),
+        h('li', {}, 'Removals and uploads need every database online, so nobody is ever duplicated or left behind.'),
+        h('li', {}, 'A down database is skipped automatically (visitors see the rest) and retried; you get an email alert.')))];
   }
 
   async function vSystem() {
@@ -526,7 +647,7 @@
         h('p', { class: 'hint mt' }, 'Copy backups off the server too (RUNBOOK.md → Offsite backups).'), h('div', { class: 'actions mt' }, h('button', { class: 'btn', type: 'button', onclick: () => runJob('backup') }, 'Back up now'), h('button', { class: 'btn', type: 'button', onclick: purge }, 'Purge caches')))];
   }
 
-  const VIEW_FN = { dashboard: vDashboard, upload: vUpload, imports: vImports, ads: vAds, donations: vDonations, whatsapp: vWhatsApp, limits: vLimits, site: vSite,
+  const VIEW_FN = { dashboard: vDashboard, upload: vUpload, imports: vImports, databases: vDatabases, ads: vAds, affiliates: vAffiliates, donations: vDonations, whatsapp: vWhatsApp, limits: vLimits, site: vSite,
     email: vEmail, removals: vRemovals, blocklist: vBlocklist, users: vUsers, audit: vAudit, system: vSystem };
 
   (async () => {

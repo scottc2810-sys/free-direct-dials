@@ -21,6 +21,29 @@
 | 14 | Low | Copy | "1 skipped: empty row 1" and "Queued 1 emails". | Fixed. |
 | 15 | Info | Supply chain | `golang.org/x/crypto` advisory GO-2026-5932: no upstream fix, and **not reachable** from our code. | Accepted. Re-check when a fix ships (CI flags it). |
 
+## Round 2 (2026-10-16): multiple databases, paging, rewarded ads
+
+| # | Sev | Area | Finding | Resolution |
+|---|---|---|---|---|
+| 16 | **High** | Ads | Google's rewarded overlay rewrites the URL hash to `#goog_rewarded`. The page treated that as a filter change: filters reset mid-video and the claim could run on *no filter*. Found by playing Google's test rewarded unit in the browser. | `#goog_*` hashes are ignored, filters are restored to the address bar afterwards, and the claim always uses the visitor's filter. Re-verified: 10 Germany contacts for a Germany filter. |
+| 17 | **High** | Data | Several databases: one person could be imported into two stores and handed out twice. | The import router checks every non-empty store for existing identities and merges there. Uploads refuse to run while any store is unreachable. Test: re-importing the whole file into the other store adds 0. |
+| 18 | **High** | Compliance | A removal had to reach every store, and a failed one could be undone by a later upload. | Suppression keys are written first, then contacts are deleted in every store. If a store is down, the self-service request is queued for the admin with the real address. Test: removal reaches every store and a re-upload is suppressed. |
+| 19 | Med | Performance / cost | The first federation design queried every database on every request (Supabase compute and egress). | Local mirror, memo per store version, store pruning, sequential background search, per-user store routing. Test: 0 remote calls for totals, single filters, plain dropdowns, stats, labels and first pages. |
+| 20 | Med | Privacy | Supabase connection strings hold a password. | AES-256-GCM sealed under a key derived from `SECRET_KEY`; never returned to the browser; driver errors are password-redacted; `sslmode=disable` refused off localhost. |
+| 21 | Med | Users | Deleting a user left unlocks in remote stores; SQLite can reuse the highest row id, so a new user could inherit them. | Unlocks are forgotten in every store holding them *before* the user row is deleted. If a store is down, the delete waits. |
+| 22 | Low | UI | An empty partner slot printed the word "null" (DOM `append(null)`). | It renders nothing. |
+| 23 | Info | Caching | Complete public responses allow 30 s stale-while-revalidate, so a browser may briefly show the previous answer after an admin change. | Accepted (public data). Pending answers never use it, so live updates always reach the server. |
+
+Verified in the browser (dev server):
+- Preview break → page 2 auto-opens with rows 11–20.
+- Sign-in → 10 s sponsor break → 10 contacts revealed with no click.
+- Google test rewarded video → reward → 10 contacts (filter kept).
+- A second database added from Superadmin → an upload split 25 new rows into it and merged the 1 existing person in place.
+- Detach is refused while the database still serves searches.
+- Validation: Google rewarded mode without an ad unit; ads.txt containing markup.
+- ads.txt is served at `/ads.txt`.
+- Partner card live; mobile (375 px) has no horizontal overflow.
+
 ## Impeccable frontend audit (directory page)
 
 Measured in the browser (light + dark, 375 / 731 / 1024 / 1280 px, emulated touch) plus `impeccable detect` on the rendered page.

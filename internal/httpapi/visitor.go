@@ -15,7 +15,6 @@ import (
 
 	"markemind/dials/internal/auth"
 	"markemind/dials/internal/emailcheck"
-	"markemind/dials/internal/filter"
 	"markemind/dials/internal/importer"
 	"markemind/dials/internal/mail"
 	"markemind/dials/internal/platform"
@@ -208,9 +207,9 @@ func (a *App) apiMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "Please sign in.")
 		return
 	}
-	v, _ := a.Unlock.View(r.Context(), uid, filter.Filter{Values: map[string][]string{}}, true)
-	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "subscribed": u.Subscribed, "ads_today": v.AdsToday,
-		"max_ads": v.MaxAds, "unlocked_total": v.Unlocked})
+	sm, _ := a.Unlock.Summary(r.Context(), uid)
+	writeJSON(w, http.StatusOK, map[string]any{"email": u.Email, "subscribed": u.Subscribed, "ads_today": sm.AdsToday,
+		"max_ads": sm.MaxAds, "unlocked_total": sm.Unlocked})
 }
 
 // ---------- unlock ----------
@@ -243,7 +242,11 @@ func (a *App) apiView(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	v, err := a.Unlock.View(r.Context(), uid, f, q.Get("newest") == "1")
+	after := q.Get("after")
+	if len(after) > 80 {
+		after = ""
+	}
+	v, err := a.Unlock.View(r.Context(), uid, f, q.Get("newest") == "1", after)
 	if err != nil {
 		a.queryError(w, err)
 		return
@@ -417,23 +420,29 @@ func (a *App) apiRemoveVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := a.Clock.Now().Unix()
-	ids, err := importer.FindByIdentity(ctx, a.DB.R, "email", email)
-	if err != nil {
+	// block future uploads first, even if the person isn't in the data today
+	if err := importer.Suppress(ctx, a.DB, "email", email, now); err != nil {
 		a.queryError(w, err)
 		return
 	}
-	n, err := importer.DeleteContacts(ctx, a.DB, ids, now)
+	n, err := a.Store.Remove(ctx, "email", email, now)
+	status, note := "done", fmt.Sprintf("self-service, verified by code; %d record(s) deleted", n)
 	if err != nil {
-		a.queryError(w, err)
-		return
+		// a database was unreachable: the identity is suppressed and the rest is
+		// queued for the admin (Removals), inside the 30-day deadline
+		a.Log.Warn("self-service removal incomplete", "err", err)
+		status, note = "pending", note+"; incomplete, a database was unreachable: process again ("+err.Error()+")"
 	}
-	importer.Suppress(ctx, a.DB, "email", email, now) // block future uploads even if not present today
-	a.DB.W.ExecContext(ctx, `INSERT INTO removals(kind, value, note, status, ts, done_ts) VALUES('email', ?, ?, 'done', ?, ?)`,
-		search.MaskEmail(email), fmt.Sprintf("self-service, verified by code; %d record(s) deleted", n), now, now)
+	value := search.MaskEmail(email)
+	if status == "pending" {
+		value = email // the admin needs the real address to finish the job
+	}
+	a.DB.W.ExecContext(ctx, `INSERT INTO removals(kind, value, note, status, ts, done_ts) VALUES('email', ?, ?, ?, ?, ?)`,
+		value, note, status, now, now)
 	if n > 0 {
 		a.purgeData(context.WithoutCancel(ctx))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n, "pending": status == "pending"})
 }
 
 type removeRequestIn struct {

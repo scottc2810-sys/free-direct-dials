@@ -158,11 +158,11 @@ func FTSQuery(keyword string) string {
 	return strings.Join(parts, " ")
 }
 
-// TechFTSQuery renders technology terms for the tech_fts index: a contact
-// matches when, for at least one term, every word of that term prefix-matches
-// one of its technologies' words ("google tag" → Google Tag Manager).
-func TechFTSQuery(terms []string) string {
-	var ors []string
+// TechQuery groups technology terms into prefix words: a contact matches when,
+// for at least one group, every word prefix-matches one of its technologies'
+// words ("google tag" → Google Tag Manager).
+func TechQuery(terms []string) [][]string {
+	var groups [][]string
 	for _, t := range terms {
 		var ands []string
 		for _, w := range strings.Fields(t) {
@@ -172,13 +172,66 @@ func TechFTSQuery(terms []string) string {
 			if len([]rune(w)) < 2 && !strings.ContainsAny(w, "+#") {
 				continue // one-letter prefixes would expand to most of the index
 			}
-			ands = append(ands, `"`+w+`"*`) // CleanTech leaves no quotes to escape
+			ands = append(ands, w)
 		}
 		if len(ands) > 0 {
-			ors = append(ors, "("+strings.Join(ands, " ")+")")
+			groups = append(groups, ands)
 		}
 	}
+	return groups
+}
+
+// TechFTSQuery renders TechQuery for the SQLite tech_fts index.
+func TechFTSQuery(terms []string) string {
+	var ors []string
+	for _, g := range TechQuery(terms) {
+		ands := make([]string, len(g))
+		for i, w := range g {
+			ands[i] = `"` + w + `"*` // CleanTech leaves no quotes to escape
+		}
+		ors = append(ors, "("+strings.Join(ands, " ")+")")
+	}
 	return strings.Join(ors, " OR ")
+}
+
+// IndexTokens splits stored text into the words keyword search can match:
+// the same folding and separators as Tokens (and as SQLite's unicode61
+// tokenizer), without the query-side limits. Used by stores without FTS5.
+func IndexTokens(s string) []string {
+	s = normalize.Fold(s)
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if len([]rune(t)) < minTokenRune {
+			continue // query tokens are never shorter, so these could never match
+		}
+		t = normalize.Truncate(t, 100)
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) == 500 {
+			break
+		}
+	}
+	return out
+}
+
+// TechTokens are the indexed words of a contact's technologies (CleanTech
+// output split on spaces, like tech_fts with tokenchars '.+#-').
+func TechTokens(tech []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range tech {
+		for _, w := range strings.Fields(t) {
+			if !seen[w] {
+				seen[w] = true
+				out = append(out, w)
+			}
+		}
+	}
+	return out
 }
 
 // TechTerms parses a comma list of technology names into folded prefixes.

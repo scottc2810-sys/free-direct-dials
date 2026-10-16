@@ -50,6 +50,21 @@ Scan the QR with an authenticator app, then open `https://markemindai.com/free-d
 
 Submit `https://markemindai.com/free-direct-dials/sitemap.xml` in Google Search Console and Bing Webmaster Tools. If the main site serves `robots.txt`, add `Sitemap: https://markemindai.com/free-direct-dials/sitemap.xml` to it. You can also link `/free-direct-dials/llms.txt` from the root `llms.txt`.
 
+### 1.5 ads.txt at the domain root
+Ad networks read only `https://markemindai.com/ads.txt`. Either add the lines to the main site's own file, **or** let this server serve it:
+Cloudflare → Rules → Origin Rules → `URI Path equals "/ads.txt"` → DNS override `origin-dials.markemindai.com`. The Caddyfile passes `/ads.txt` to the app, which serves Superadmin → Ads → ads.txt (empty = 404). Check with `curl -s https://markemindai.com/ads.txt`. Details: docs/MONETIZATION.md §4.
+
+### 1.6 Extra contact databases (Supabase free projects)
+The VPS database always holds accounts and settings, and is searched first. Supabase projects add room for contacts.
+1. supabase.com → New project (pick the region closest to the VPS) → save the database password.
+2. Project → **Connect** → **Session pooler** → copy the URI (IPv4; the direct host is IPv6-only on the free plan). Replace `[YOUR-PASSWORD]`.
+3. Superadmin → **Databases** → name, quota **500 MB** → *Test connection* → *Add database*. The app creates its tables in schema `fdd` (not exposed by Supabase's REST/GraphQL APIs; row-level security on).
+4. Uploads: *Store new contacts in* → **Auto** fills one database to 90 % then moves to the next. People already in any database merge where they are.
+5. For certificate pinning, download Supabase's CA (Project Settings → Database → SSL) to `/etc/dials/supabase-ca.crt` and append `?sslmode=verify-full&sslrootcert=/etc/dials/supabase-ca.crt` to the connection string. Without it the connection is still encrypted (`sslmode=require` is enforced).
+- Every database is pinged at startup and every **6 hours** (a real write), so free projects never hit the 7-day inactivity pause. `dials stores` lists them all with size, contacts and state.
+- Supabase allows **two** free projects per account. Don't create extra accounts to get more (it breaks their terms); upgrade one project to Pro (8 GB) instead.
+- Integration tests against a **throwaway** project: put `DIALS_TEST_PG_DSN=postgresql://…` in `data/test-supabase.env` (git-ignored) and run `go test ./internal/store/ -run Postgres`. The test drops and recreates schema `fdd` there.
+
 ## 2. Superadmin access (IP allow-list)
 
 Three independent layers have to agree. If any one of them denies a request, the visitor gets a plain 404.
@@ -101,6 +116,8 @@ The app trusts the client IP only from Caddy on loopback, and Caddy trusts `CF-C
 | 503 "busy" on searches | more than 8 concurrent uncached queries | Usually a crawler. Cloudflare → Security → *Under Attack mode* for an hour. Check the Cache Rules. |
 | p95 above 500 ms on searches | DB outgrew RAM | `dials bench` and compare with docs/PERFORMANCE.md. Move to 2 GB RAM (no code changes). |
 | Ad account warning from Adsterra | policy flag | Superadmin → Ads → keep *Sponsor break* mode and don't incentivise clicks. |
+| **Contact database unreachable** | email alert; dashboard warning; that store shows *down* | Visitors still get every other database (results marked partial) and uploads pause. A paused Supabase project: open it in the dashboard → *Restore*. Then Superadmin → Databases → *Ping all now*. |
+| **Contact database N % full** | email alert at 80 %+ | At 90 % Auto uploads move to the next database. Add a database, or raise the quota after upgrading the project. |
 
 ## 6. Health checks
 
@@ -115,4 +132,5 @@ The app trusts the client IP only from Caddy on loopback, and Caddy trusts `CF-C
 |---|---|
 | more than 2 M contacts or DB over 6 GB | VPS with 2 GB RAM and 40 GB disk: copy `/var/lib/dials`, done |
 | sustained > 50 uncached req/s | 2 vCPU. Raise `Readers` in `db.Options` |
-| multiple servers needed | move SQLite to Postgres; the store layer is the only package that changes |
+| contacts outgrow the VPS disk | add Supabase/Postgres databases in Superadmin → Databases (§1.6); the VPS keeps accounts and stays first in search order |
+| multiple app servers needed | the control plane (users, sessions, settings) is still SQLite: move it to Postgres behind the same interfaces |

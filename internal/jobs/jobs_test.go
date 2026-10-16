@@ -156,7 +156,7 @@ func TestMaintenanceJobs(t *testing.T) {
 		t.Fatal("stale upload not removed")
 	}
 	var used atomic.Int64
-	if err := Monthly(ctx, d, clk, fakeDisk(&used), quiet); err != nil {
+	if err := Monthly(ctx, d, clk, fakeDisk(&used), quiet, nil); err != nil {
 		t.Fatal(err)
 	}
 }

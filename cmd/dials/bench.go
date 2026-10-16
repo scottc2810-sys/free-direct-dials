@@ -16,6 +16,7 @@ import (
 	"markemind/dials/internal/platform"
 	"markemind/dials/internal/search"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 	"markemind/dials/internal/unlock"
 )
 
@@ -92,7 +93,7 @@ func benchCmd(ctx context.Context, cfg *config.Config, args []string) error {
 	clk := platform.SystemClock{}
 	st := &settings.Store{DB: d, Clock: clk}
 	st.Load(ctx)
-	us := &unlock.Service{DB: d, Search: svc, Settings: st, Clock: clk}
+	us := &unlock.Service{DB: d, Fed: store.NewLocal(d), Settings: st, Clock: clk}
 	var uid int64
 	if err := d.W.QueryRowContext(ctx, `INSERT INTO users(email, created, last_seen, subscribed, unsub_token) VALUES('bench@localhost.invalid',0,0,0,?) RETURNING id`,
 		platform.Token(16)).Scan(&uid); err != nil {
@@ -117,7 +118,7 @@ func benchCmd(ctx context.Context, cfg *config.Config, args []string) error {
 		lat = append(lat, time.Since(t0))
 	}
 	fmt.Printf("claim (2 dims, 40 consecutive batches): %s\n", pct(lat))
-	vt := timeit(reps, func() { us.View(ctx, uid, f, false) })
+	vt := timeit(reps, func() { us.View(ctx, uid, f, false, "") })
 	fmt.Printf("personal view (400 unlocked): %s\n", vt)
 
 	if len(args) > 0 && args[0] == "-plans" {

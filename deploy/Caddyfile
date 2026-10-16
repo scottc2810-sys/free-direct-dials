@@ -29,7 +29,9 @@ markemindai.com, origin-dials.markemindai.com {
 	}
 	respond @adminDenied 404
 
-	@dials path /free-direct-dials /free-direct-dials/* /free-direct-dails /free-direct-dails/*
+	# /ads.txt: only if a Cloudflare Origin Rule sends the domain-root file here (RUNBOOK §1.5);
+	# ad networks read it only at the root, and the app serves it from Superadmin → Ads.
+	@dials path /free-direct-dials /free-direct-dials/* /free-direct-dails /free-direct-dails/* /ads.txt
 	handle @dials {
 		request_body {
 			max_size 20MB # admin upload chunks are 8 MB; visitor JSON is capped far lower in the app

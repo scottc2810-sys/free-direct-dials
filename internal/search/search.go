@@ -517,17 +517,7 @@ func (s *Service) Preview(ctx context.Context, r *Resolved) (int64, []Row, error
 	if err != nil || total == 0 {
 		return total, []Row{}, err
 	}
-	ctx, release, err := s.acquire(ctx)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer release()
-	where, args := r.Where("")
-	ids, err := queryIDs(ctx, s.DB.R, `SELECT c.id FROM contacts c WHERE `+where+` ORDER BY c.id LIMIT ?`, append(args, PreviewLimit)...)
-	if err != nil {
-		return 0, nil, err
-	}
-	rows, err := s.FetchRows(ctx, s.DB.R, ids, false)
+	rows, err := s.Page(ctx, r, 0, PreviewLimit)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -535,6 +525,29 @@ func (s *Service) Preview(ctx context.Context, r *Resolved) (int64, []Row, error
 		Mask(&rows[i])
 	}
 	return total, rows, nil
+}
+
+// Page returns matching contacts in id order, unmasked (callers mask).
+func (s *Service) Page(ctx context.Context, r *Resolved, offset, limit int) ([]Row, error) {
+	if r.Impossible() || limit <= 0 {
+		return []Row{}, nil
+	}
+	ctx, release, err := s.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	where, args := r.Where("")
+	ids, err := queryIDs(ctx, s.DB.R, `SELECT c.id FROM contacts c WHERE `+where+` ORDER BY c.id LIMIT ? OFFSET ?`, append(args, limit, max(offset, 0))...)
+	if err != nil {
+		return nil, err
+	}
+	return s.FetchRows(ctx, s.DB.R, ids, false)
+}
+
+// Acquire exposes the read semaphore to other packages that query this database.
+func (s *Service) Acquire(ctx context.Context) (context.Context, func(), error) {
+	return s.acquire(ctx)
 }
 
 func queryIDs(ctx context.Context, q db.Querier, query string, args ...any) ([]int64, error) {

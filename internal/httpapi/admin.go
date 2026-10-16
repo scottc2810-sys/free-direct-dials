@@ -23,6 +23,7 @@ import (
 	"markemind/dials/internal/payments"
 	"markemind/dials/internal/platform"
 	"markemind/dials/internal/settings"
+	"markemind/dials/internal/store"
 )
 
 const adminCookie = "fdd_a"
@@ -78,6 +79,13 @@ func (a *App) adminRoutes(m *http.ServeMux) {
 	authed("GET /api/users", a.adminUsers)
 	authed("POST /api/users/{id}/block", a.adminUserBlock)
 	authed("DELETE /api/users/{id}", a.adminUserDelete)
+
+	authed("GET /api/stores", a.adminStores)
+	authed("POST /api/stores/test", a.adminStoreTest)
+	authed("POST /api/stores", a.adminStoreAdd)
+	authed("POST /api/stores/{id}", a.adminStoreUpdate)
+	authed("DELETE /api/stores/{id}", a.adminStoreDetach)
+	authed("POST /api/stores/check", a.adminStoreCheck)
 
 	authed("GET /api/audit", a.adminAudit)
 	authed("GET /api/backups", a.adminBackups)
@@ -208,7 +216,7 @@ func (a *App) adminSession(w http.ResponseWriter, r *http.Request, s auth.AdminS
 
 func (a *App) adminFields(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
 	writeJSON(w, http.StatusOK, map[string]any{"fields": importer.FieldOptions, "networks": payments.Networks,
-		"slots": settings.SlotNames, "placements": settings.PlacementNames})
+		"slots": settings.SlotNames, "placements": settings.PlacementNames, "aff_placements": settings.AffiliatePlacements})
 }
 
 func scalarQ(ctx context.Context, q db.Querier, query string, args ...any) int64 {
@@ -273,8 +281,21 @@ func (a *App) adminStats(w http.ResponseWriter, r *http.Request, s auth.AdminSes
 	if n := scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM removals WHERE status='pending'`); n > 0 {
 		warns = append(warns, fmt.Sprintf("%d removal request(s) are waiting (30-day legal deadline).", n))
 	}
+	stores := a.Store.Statuses(ctx)
+	for _, st := range stores {
+		switch {
+		case st.State == "down":
+			warns = append(warns, fmt.Sprintf("Database %q is unreachable: its contacts are missing from results and uploads are paused. %s", st.Name, st.LastErr))
+		case st.Pct >= 80:
+			warns = append(warns, fmt.Sprintf("Database %q is %d%% of its quota: add another database (Databases) before it fills.", st.Name, st.Pct))
+		}
+	}
+	if cfg.WhatsApp.Number == "" || !cfg.WhatsApp.Enabled {
+		warns = append(warns, "WhatsApp contact is off: bulk-data leads have nowhere to go (Settings → WhatsApp).")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"headline": importer.LoadStats(ctx, a.DB.R),
+		"headline": a.Store.Stats(ctx),
+		"stores":   stores,
 		"users": map[string]int64{
 			"total":      scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM users`),
 			"subscribed": scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM users WHERE subscribed=1 AND bounced=0 AND blocked=0`),
@@ -283,16 +304,16 @@ func (a *App) adminStats(w http.ResponseWriter, r *http.Request, s auth.AdminSes
 			"active_7d":  scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM users WHERE last_seen>=?`, dayStart-6*86400),
 		},
 		"unlocks": map[string]int64{
-			"ads_today":      scalarQ(ctx, a.DB.R, `SELECT COALESCE(SUM(ads),0) FROM user_daily WHERE day=?`, today),
-			"users_today":    scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM user_daily WHERE day=?`, today),
-			"total_unlocked": scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM unlocked`),
+			"ads_today":    scalarQ(ctx, a.DB.R, `SELECT COALESCE(SUM(ads),0) FROM user_daily WHERE day=?`, today),
+			"users_today":  scalarQ(ctx, a.DB.R, `SELECT COUNT(*) FROM user_daily WHERE day=?`, today),
+			"breaks_total": scalarQ(ctx, a.DB.R, `SELECT COALESCE(SUM(ads),0) FROM user_daily`),
 		},
 		"outbox":  a.Outbox.Status(ctx),
 		"disk":    map[string]any{"pct": pct, "level": lv, "free": ds.Free, "total": ds.Total},
-		"db":      map[string]any{"bytes": dbSize, "wal_bytes": walSize, "dataset_version": a.DB.DatasetVersion(), "schema": a.DB.SchemaVersion(ctx)},
+		"db":      map[string]any{"bytes": dbSize, "wal_bytes": walSize, "dataset_version": a.Store.Version(), "schema": a.DB.SchemaVersion(ctx)},
 		"backups": a.Backup.List(),
 		"jobs":    a.Sched.Status(ctx),
-		"cache":   a.Search.Cache.Stats(),
+		"cache":   a.Store.Cache.Stats(),
 		"runtime": map[string]any{"goroutines": runtime.NumGoroutine(), "heap_mb": ms.HeapAlloc >> 20, "sys_mb": ms.Sys >> 20,
 			"uptime_s": int64(now.Sub(a.Started).Seconds())},
 		"importing": a.Imports.Running(),
@@ -435,6 +456,7 @@ func (a *App) adminUploadDryRun(w http.ResponseWriter, r *http.Request, s auth.A
 type importIn struct {
 	sheetIn
 	Signature string `json:"signature"`
+	Target    string `json:"target"` // "auto" or a database id
 }
 
 func (a *App) adminUploadImport(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
@@ -456,7 +478,16 @@ func (a *App) adminUploadImport(w http.ResponseWriter, r *http.Request, s auth.A
 			db.SetMeta(r.Context(), a.DB.W, "mapping:"+in.Signature, string(b))
 		}
 	}
-	id, err := a.Imports.Start(r.PathValue("id"), in.Sheet, in.Mapping, s.Username)
+	target := store.Auto
+	if in.Target != "" && in.Target != "auto" {
+		n, err := strconv.Atoi(in.Target)
+		if err != nil || a.Store.Member(n) == nil {
+			writeErr(w, http.StatusBadRequest, "bad_target", "Unknown database.")
+			return
+		}
+		target = n
+	}
+	id, err := a.Imports.Start(r.PathValue("id"), in.Sheet, in.Mapping, s.Username, target)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, ErrImportRunning) {
@@ -485,12 +516,13 @@ type uploadRow struct {
 	Notified  int64           `json:"notified"`
 	By        string          `json:"by"`
 	Finished  int64           `json:"finished"`
+	Target    string          `json:"target"`
 	Live      *importer.Stats `json:"live,omitempty"`
 }
 
 func (a *App) loadUploads(ctx context.Context, where string, args ...any) ([]uploadRow, error) {
 	rows, err := a.DB.R.QueryContext(ctx, `SELECT id, ts, filename, bytes, rows, added, updated, unchanged, skipped, skip_reasons,
-		status, error, notified, by, finished FROM uploads `+where, args...)
+		status, error, notified, by, finished, target FROM uploads `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +532,7 @@ func (a *App) loadUploads(ctx context.Context, where string, args ...any) ([]upl
 		var u uploadRow
 		var reasons string
 		if err := rows.Scan(&u.ID, &u.TS, &u.Filename, &u.Bytes, &u.Rows, &u.Added, &u.Updated, &u.Unchanged, &u.Skipped, &reasons,
-			&u.Status, &u.Error, &u.Notified, &u.By, &u.Finished); err != nil {
+			&u.Status, &u.Error, &u.Notified, &u.By, &u.Finished, &u.Target); err != nil {
 			return nil, err
 		}
 		u.Reasons = json.RawMessage(orDefault(reasons, "{}"))
@@ -515,12 +547,30 @@ func (a *App) loadUploads(ctx context.Context, where string, args ...any) ([]upl
 }
 
 func (a *App) adminImports(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
-	rows, err := a.loadUploads(r.Context(), `ORDER BY id DESC LIMIT 50`)
+	pg := pageOf(r, 25, scalarQ(r.Context(), a.DB.R, `SELECT COUNT(*) FROM uploads`))
+	rows, err := a.loadUploads(r.Context(), `ORDER BY id DESC LIMIT ? OFFSET ?`, pg.Per, pg.offset())
 	if err != nil {
 		a.queryError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"imports": rows, "running": a.Imports.Running()})
+	writeJSON(w, http.StatusOK, map[string]any{"imports": rows, "running": a.Imports.Running(), "paging": pg})
+}
+
+// paging is a page of an admin list (offset paging: admin lists are small).
+type paging struct {
+	Page  int   `json:"page"` // 0-based
+	Pages int   `json:"pages"`
+	Per   int   `json:"per"`
+	Total int64 `json:"total"`
+}
+
+func (p paging) offset() int { return p.Page * p.Per }
+
+func pageOf(r *http.Request, per int, total int64) paging {
+	p := paging{Per: per, Total: total, Pages: int(max(1, (total+int64(per)-1)/int64(per)))}
+	p.Page, _ = strconv.Atoi(r.URL.Query().Get("page"))
+	p.Page = max(0, min(p.Page, p.Pages-1))
+	return p
 }
 
 func (a *App) adminImport(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
@@ -697,7 +747,9 @@ func (a *App) adminRemovals(w http.ResponseWriter, r *http.Request, s auth.Admin
 	if status == "" {
 		status = "pending"
 	}
-	rows, err := a.DB.R.QueryContext(r.Context(), `SELECT id, kind, value, note, status, ts, done_ts FROM removals WHERE status=? ORDER BY id DESC LIMIT 200`, status)
+	pg := pageOf(r, 50, scalarQ(r.Context(), a.DB.R, `SELECT COUNT(*) FROM removals WHERE status=?`, status))
+	rows, err := a.DB.R.QueryContext(r.Context(), `SELECT id, kind, value, note, status, ts, done_ts FROM removals WHERE status=? ORDER BY id DESC LIMIT ? OFFSET ?`,
+		status, pg.Per, pg.offset())
 	if err != nil {
 		a.queryError(w, err)
 		return
@@ -711,7 +763,7 @@ func (a *App) adminRemovals(w http.ResponseWriter, r *http.Request, s auth.Admin
 		out = append(out, map[string]any{"id": id, "kind": kind, "value": value, "note": note, "status": st, "ts": ts, "done_ts": done,
 			"due": ts + 30*86400})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removals": out})
+	writeJSON(w, http.StatusOK, map[string]any{"removals": out, "paging": pg})
 }
 
 type removalIn struct {
@@ -743,6 +795,10 @@ func (a *App) adminRemovalProcess(w http.ResponseWriter, r *http.Request, s auth
 		kind, value = in.Kind, in.Value
 	}
 	n, err := a.removeIdentity(ctx, kind, value, now)
+	if errors.Is(err, store.ErrUnavailable) || (err != nil && n > 0) {
+		writeErr(w, http.StatusServiceUnavailable, "store_down", fmt.Sprintf("%d record(s) deleted, but %v. The identity is blocked from uploads; process again when every database is online.", n, err))
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_identity", err.Error())
 		return
@@ -752,20 +808,17 @@ func (a *App) adminRemovalProcess(w http.ResponseWriter, r *http.Request, s auth
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
 }
 
+// removeIdentity blocks an identity from future uploads, then deletes every
+// matching contact in every store.
 func (a *App) removeIdentity(ctx context.Context, kind, value string, now int64) (int, error) {
-	ids, err := importer.FindByIdentity(ctx, a.DB.R, kind, value)
-	if err != nil {
+	if err := importer.Suppress(ctx, a.DB, kind, value, now); err != nil {
 		return 0, err
 	}
-	n, err := importer.DeleteContacts(ctx, a.DB, ids, now)
-	if err != nil {
-		return n, err
-	}
-	importer.Suppress(ctx, a.DB, kind, value, now)
+	n, err := a.Store.Remove(ctx, kind, value, now)
 	if n > 0 {
 		a.purgeData(context.WithoutCancel(ctx))
 	}
-	return n, nil
+	return n, err
 }
 
 func (a *App) adminContactRemove(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
@@ -786,8 +839,11 @@ func (a *App) adminContactRemove(w http.ResponseWriter, r *http.Request, s auth.
 
 func (a *App) adminUsers(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
+	pg := pageOf(r, 50, scalarQ(r.Context(), a.DB.R, `SELECT COUNT(*) FROM users WHERE email LIKE ? ESCAPE '\'`, like))
 	rows, err := a.DB.R.QueryContext(r.Context(), `SELECT u.id, u.email, u.created, u.last_seen, u.subscribed, u.blocked, u.bounced,
-		(SELECT COUNT(*) FROM unlocked x WHERE x.user_id=u.id) FROM users u WHERE u.email LIKE ? ORDER BY u.last_seen DESC LIMIT 100`, "%"+q+"%")
+		(SELECT COALESCE(SUM(ads),0) FROM user_daily x WHERE x.user_id=u.id) FROM users u WHERE u.email LIKE ? ESCAPE '\'
+		ORDER BY u.last_seen DESC LIMIT ? OFFSET ?`, like, pg.Per, pg.offset())
 	if err != nil {
 		a.queryError(w, err)
 		return
@@ -800,9 +856,9 @@ func (a *App) adminUsers(w http.ResponseWriter, r *http.Request, s auth.AdminSes
 		var sub, blk, bnc int
 		rows.Scan(&id, &email, &created, &seen, &sub, &blk, &bnc, &n)
 		out = append(out, map[string]any{"id": id, "email": email, "created": created, "last_seen": seen, "subscribed": sub == 1,
-			"blocked": blk == 1, "bounced": bnc == 1, "unlocked": n})
+			"blocked": blk == 1, "bounced": bnc == 1, "breaks": n})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+	writeJSON(w, http.StatusOK, map[string]any{"users": out, "paging": pg})
 }
 
 func (a *App) adminUserBlock(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
@@ -825,6 +881,11 @@ func (a *App) adminUserBlock(w http.ResponseWriter, r *http.Request, s auth.Admi
 
 func (a *App) adminUserDelete(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	// unlocks live in every store; drop them first so a reused id can never inherit them
+	if err := a.Store.ForgetUser(r.Context(), id); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "store_down", "A database is unreachable, so this user's unlocks can't be deleted yet. Try again shortly.")
+		return
+	}
 	if err := a.Users.Delete(r.Context(), id); err != nil {
 		a.queryError(w, err)
 		return
@@ -853,7 +914,11 @@ func (a *App) adminAudit(w http.ResponseWriter, r *http.Request, s auth.AdminSes
 		rows.Scan(&id, &ts, &actor, &ip, &action, &detail)
 		out = append(out, map[string]any{"id": id, "ts": ts, "actor": actor, "ip": ip, "action": action, "detail": detail})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"audit": out})
+	next := int64(0)
+	if len(out) == 100 {
+		next = out[99]["id"].(int64)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"audit": out, "next": next})
 }
 
 func (a *App) adminBackups(w http.ResponseWriter, r *http.Request, s auth.AdminSession) {

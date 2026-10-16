@@ -56,37 +56,73 @@ func FindByIdentity(ctx context.Context, q db.Querier, kind, value string) ([]in
 	return ids, rows.Err()
 }
 
-// DeleteContacts removes contacts everywhere, adds their identities to the
-// suppression list (so re-uploads skip them) and keeps counts exact.
-func DeleteContacts(ctx context.Context, d *db.DB, ids []int64, now int64) (int, error) {
+// ContactKeys returns the suppression keys of contacts (call before deleting them).
+func ContactKeys(ctx context.Context, q db.Querier, ids []int64) ([]string, error) {
+	var keys []string
+	for len(ids) > 0 {
+		n := min(500, len(ids))
+		args := make([]any, n)
+		for i, id := range ids[:n] {
+			args[i] = id
+		}
+		ids = ids[n:]
+		rows, err := q.QueryContext(ctx, `SELECT email_key, li_key, h_key FROM contact_info WHERE id IN (`+db.Placeholders(n)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var ek, lk, hk sql.NullString
+			if err := rows.Scan(&ek, &lk, &hk); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			keys = append(keys, SuppressKeys(ek.String, lk.String, hk.String)...)
+		}
+		rows.Close()
+	}
+	return keys, nil
+}
+
+// AddSuppress records identity keys that future uploads must skip.
+func AddSuppress(ctx context.Context, d *db.DB, keys []string, now int64) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return d.Tx(ctx, func(tx *sql.Tx) error {
+		for _, k := range keys {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO suppress(k, ts) VALUES(?,?)`, k, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteContacts removes contacts from one SQLite store (search indexes and
+// unlocks included) and keeps per-value counts exact. Suppress their keys
+// first (ContactKeys + AddSuppress) so a re-upload can't bring them back.
+func DeleteContacts(ctx context.Context, d *db.DB, ids []int64) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
 	deleted := 0
 	cols := make([]string, len(filter.Dims))
 	for i, dm := range filter.Dims {
-		cols[i] = "c." + dm.Key
+		cols[i] = dm.Key
 	}
 	err := d.Tx(ctx, func(tx *sql.Tx) error {
 		for _, id := range ids {
-			var ek, lk, hk sql.NullString
 			var dims [12]int64
-			dst := []any{&ek, &lk, &hk}
+			dst := make([]any, len(dims))
 			for i := range dims {
-				dst = append(dst, &dims[i])
+				dst[i] = &dims[i]
 			}
-			err := tx.QueryRowContext(ctx, `SELECT i.email_key, i.li_key, i.h_key, `+strings.Join(cols, ",")+`
-				FROM contacts c JOIN contact_info i ON i.id=c.id WHERE c.id=?`, id).Scan(dst...)
+			err := tx.QueryRowContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM contacts WHERE id=?`, id).Scan(dst...)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			if err != nil {
 				return err
-			}
-			for _, k := range SuppressKeys(ek.String, lk.String, hk.String) {
-				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO suppress(k, ts) VALUES(?,?)`, k, now); err != nil {
-					return err
-				}
 			}
 			for _, q := range []string{
 				`DELETE FROM fts WHERE rowid=?`, `DELETE FROM tech_fts WHERE rowid=?`,

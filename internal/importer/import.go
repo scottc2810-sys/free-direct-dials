@@ -60,25 +60,122 @@ func (s Stats) clone() Stats {
 
 type Options struct {
 	Mapping   Mapping      // nil → AutoMap(headers)
-	BatchSize int          // rows per transaction (default 2000)
+	BatchSize int          // rows per transaction (default 5000)
 	CanWrite  func() error // disk guard, checked per batch
 	Progress  func(Stats)
 	Clock     platform.Clock
+	Target    Target // where records go; nil → the importer's own SQLite database
 }
 
+// Importer cleans rows and hands them to a Target. DB is the control database:
+// it holds the suppression list (removed people) and, by default, the contacts.
 type Importer struct {
 	DB         *db.DB
 	Disposable *emailcheck.Disposable
 }
 
-// record is one cleaned CSV row.
-type record struct {
-	name, title, company, website, linkedin, email, phone string
-	dimRaw                                                [12]string
-	dimN                                                  [12]string
-	tech                                                  []string
-	extra                                                 map[string]string
-	emailKey, liKey, hKey                                 string
+// Record is one cleaned input row, ready to be stored.
+type Record struct {
+	Name, Title, Company, Website, LinkedIn, Email, Phone string
+	DimRaw                                                [12]string // as written in the file (label candidates)
+	DimN                                                  [12]string // normalised (filter values)
+	Tech                                                  []string   // folded technology names, sorted
+	Extra                                                 map[string]string
+	EmailKey, LiKey, HKey                                 string // identity keys, in match priority order
+}
+
+// Counts are the outcome of writing one batch.
+type Counts struct{ Added, Updated, Unchanged int64 }
+
+// Target stores records: one database, or a router over several (store.Federation).
+type Target interface {
+	Begin(ctx context.Context) error
+	// Write upserts recs: a record whose identity (email, then LinkedIn, then
+	// name+company+title+phone) is already stored merges into that contact.
+	Write(ctx context.Context, recs []*Record, now int64) (Counts, error)
+	// End settles labels, per-value counts and planner statistics.
+	End(ctx context.Context, changed int64) error
+	// Abort is End after a failure: committed batches stay and become consistent.
+	Abort(ctx context.Context, changed int64)
+}
+
+// Stored is a contact as a store holds it; Merge works on it for every store kind.
+type Stored struct {
+	Dims                                                  [12]int64
+	EmailKey, LiKey, HKey                                 string
+	Name, Title, Company, Website, LinkedIn, Email, Phone string
+	Extra                                                 map[string]string
+}
+
+// KeyFree reports whether identity key (kind 'e', 'l' or 'h') is unused or
+// already belongs to the contact being merged.
+type KeyFree func(kind byte, key string) (bool, error)
+
+// Merge folds r into cur. Non-empty incoming values win; identity keys move
+// only when no other contact owns them; extra columns are merged by name.
+func Merge(cur *Stored, r *Record, dims [12]int64, keyFree KeyFree) (changed, techChanged bool, err error) {
+	set := func(p *string, v string) {
+		if v != "" && *p != v {
+			*p, changed = v, true
+		}
+	}
+	set(&cur.Name, r.Name)
+	set(&cur.Title, r.Title)
+	set(&cur.Company, r.Company)
+	set(&cur.Website, r.Website)
+	set(&cur.Phone, r.Phone)
+	for i := range filter.Dims {
+		if r.DimN[i] != "" && dims[i] != cur.Dims[i] {
+			cur.Dims[i], changed = dims[i], true
+		}
+	}
+	if r.Email != "" && r.EmailKey != cur.EmailKey {
+		ok, err := keyFree('e', r.EmailKey)
+		if err != nil {
+			return false, false, err
+		}
+		if ok {
+			cur.Email, cur.EmailKey, changed = r.Email, r.EmailKey, true
+		}
+	}
+	if r.LiKey != "" && r.LiKey != cur.LiKey {
+		ok, err := keyFree('l', r.LiKey)
+		if err != nil {
+			return false, false, err
+		}
+		if ok {
+			cur.LinkedIn, cur.LiKey, changed = r.LinkedIn, r.LiKey, true
+		}
+	}
+	if cur.HKey == "" && r.HKey != "" {
+		ok, err := keyFree('h', r.HKey)
+		if err != nil {
+			return false, false, err
+		}
+		if ok {
+			cur.HKey, changed = r.HKey, true
+		}
+	}
+	if cur.Extra == nil {
+		cur.Extra = map[string]string{}
+	}
+	techChanged = len(r.Tech) > 0 && cur.Extra["Technologies"] != r.Extra["Technologies"]
+	for k, v := range r.Extra {
+		if cur.Extra[k] != v {
+			if len(cur.Extra) >= maxExtraKeys && cur.Extra[k] == "" {
+				continue
+			}
+			cur.Extra[k], changed = v, true
+		}
+	}
+	return changed, techChanged, nil
+}
+
+// FTSText is what keyword search matches: name, title, company, industry,
+// sector, skills, products and keywords.
+func FTSText(name, title, company, industry, sector string, extra map[string]string) string {
+	parts := []string{name, title, company, industry, sector, extra["Skills"], extra["Products"], extra["Keywords"]}
+	return strings.Join(parts, " \n ")
 }
 
 // Preview returns sniffing info, headers, the automatic mapping and up to n rows.
@@ -151,16 +248,18 @@ func (im *Importer) Run(ctx context.Context, r io.Reader, opt Options) (Stats, e
 	if err := mapping.Validate(); err != nil {
 		return st, err
 	}
-	run := &runState{im: im, opt: opt, idx: mapping.index(), headers: headers, stats: &st,
-		dimCache: map[int]map[string]int64{}, touched: map[int64]struct{}{}}
-	bulk, err := beginBulk(ctx, im.DB)
-	if err != nil {
+	run := &runState{im: im, opt: opt, idx: mapping.index(), headers: headers, stats: &st}
+	tgt := opt.Target
+	if tgt == nil {
+		tgt = &SQLiteTarget{DB: im.DB}
+	}
+	if err := tgt.Begin(ctx); err != nil {
 		return st, err
 	}
-	bulkDone := false
+	ended := false
 	defer func() {
-		if !bulkDone {
-			bulk.end(context.WithoutCancel(ctx), st.Added+st.Updated)
+		if !ended {
+			tgt.Abort(context.WithoutCancel(ctx), st.Added+st.Updated)
 		}
 	}()
 
@@ -174,7 +273,7 @@ func (im *Importer) Run(ctx context.Context, r io.Reader, opt Options) (Stats, e
 				return err
 			}
 		}
-		if err := run.processBatch(ctx, batch); err != nil {
+		if err := run.processBatch(ctx, tgt, batch); err != nil {
 			return err
 		}
 		batch = batch[:0]
@@ -212,25 +311,96 @@ func (im *Importer) Run(ctx context.Context, r io.Reader, opt Options) (Stats, e
 	if err := flush(); err != nil {
 		return st, err
 	}
-	bulkDone = true
-	if err := bulk.end(ctx, st.Added+st.Updated); err != nil {
-		return st, err
-	}
-	if err := run.finalize(ctx); err != nil {
+	ended = true
+	if err := tgt.End(ctx, st.Added+st.Updated); err != nil {
 		return st, err
 	}
 	return st, nil
 }
 
+// processBatch cleans one batch, drops suppressed (removed) people and writes the rest.
+func (rs *runState) processBatch(ctx context.Context, tgt Target, batch [][]string) error {
+	recs := make([]*Record, 0, len(batch))
+	for _, fields := range batch {
+		rec, reason := rs.build(fields)
+		if reason != "" {
+			rs.stats.Skipped++
+			rs.stats.Reasons[reason]++
+			continue
+		}
+		recs = append(recs, &rec)
+	}
+	recs, err := rs.im.dropSuppressed(ctx, recs, rs.stats)
+	if err != nil {
+		return err
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	c, err := tgt.Write(ctx, recs, rs.opt.Clock.Now().Unix())
+	if err != nil {
+		return err
+	}
+	rs.stats.Added += c.Added
+	rs.stats.Updated += c.Updated
+	rs.stats.Unchanged += c.Unchanged
+	return nil
+}
+
+// dropSuppressed removes records whose identity is on the suppression list.
+func (im *Importer) dropSuppressed(ctx context.Context, recs []*Record, st *Stats) ([]*Record, error) {
+	if im.DB == nil || len(recs) == 0 {
+		return recs, nil
+	}
+	var keys []any
+	for _, r := range recs {
+		for _, k := range SuppressKeys(r.EmailKey, r.LiKey, r.HKey) {
+			keys = append(keys, k)
+		}
+	}
+	hit := map[string]bool{}
+	for len(keys) > 0 {
+		n := min(500, len(keys))
+		rows, err := im.DB.R.QueryContext(ctx, `SELECT k FROM suppress WHERE k IN (`+db.Placeholders(n)+`)`, keys[:n]...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			hit[k] = true
+		}
+		rows.Close()
+		keys = keys[n:]
+	}
+	if len(hit) == 0 {
+		return recs, nil
+	}
+	out := recs[:0]
+	for _, r := range recs {
+		drop := false
+		for _, k := range SuppressKeys(r.EmailKey, r.LiKey, r.HKey) {
+			drop = drop || hit[k]
+		}
+		if drop {
+			st.Skipped++
+			st.Reasons["suppressed"]++
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 type runState struct {
-	im       *Importer
-	opt      Options
-	idx      map[string][]int
-	headers  []string
-	stats    *Stats
-	dimCache map[int]map[string]int64 // dim index → value_n → id
-	touched  map[int64]struct{}       // dim ids whose label may change
-	spell    map[int64]map[string]int64
+	im      *Importer
+	opt     Options
+	idx     map[string][]int
+	headers []string
+	stats   *Stats
 }
 
 func (rs *runState) get(fields []string, field string, max int) string {
@@ -245,14 +415,14 @@ func (rs *runState) get(fields []string, field string, max int) string {
 }
 
 // build cleans one row; reason != "" means skip.
-func (rs *runState) build(fields []string) (record, string) {
-	var r record
+func (rs *runState) build(fields []string) (Record, string) {
+	var r Record
 	g := func(f string) string { return rs.get(fields, f, maxField) }
-	r.name = g(FName)
-	if r.name == "" {
-		r.name = strings.TrimSpace(g(FFirst) + " " + g(FLast))
+	r.Name = g(FName)
+	if r.Name == "" {
+		r.Name = strings.TrimSpace(g(FFirst) + " " + g(FLast))
 	}
-	r.title, r.company, r.website = g(FTitle), g(FCompany), g(FWebsite)
+	r.Title, r.Company, r.Website = g(FTitle), g(FCompany), g(FWebsite)
 
 	if raw := g(FEmail); raw != "" {
 		found := false
@@ -266,7 +436,7 @@ func (rs *runState) build(fields []string) (record, string) {
 				found = true
 				break
 			}
-			r.email, found = e, true
+			r.Email, found = e, true
 			break
 		}
 		if !found {
@@ -275,7 +445,7 @@ func (rs *runState) build(fields []string) (record, string) {
 	}
 	for _, f := range phonePriority {
 		for _, i := range rs.idx[f] {
-			if i >= len(fields) || r.phone != "" {
+			if i >= len(fields) || r.Phone != "" {
 				continue
 			}
 			v := normalize.Value(fields[i])
@@ -283,7 +453,7 @@ func (rs *runState) build(fields []string) (record, string) {
 				continue
 			}
 			if normalize.ValidPhone(v) {
-				r.phone = normalize.Truncate(v, 40)
+				r.Phone = normalize.Truncate(v, 40)
 			} else {
 				rs.stats.Cleaned["phone_invalid"]++
 			}
@@ -291,7 +461,7 @@ func (rs *runState) build(fields []string) (record, string) {
 	}
 	if li := g(FLinkedIn); li != "" {
 		if k := normalize.LinkedInKey(li); k != "" {
-			r.linkedin, r.liKey = li, k
+			r.LinkedIn, r.LiKey = li, k
 		} else {
 			rs.stats.Cleaned["linkedin_invalid"]++
 		}
@@ -299,7 +469,7 @@ func (rs *runState) build(fields []string) (record, string) {
 	for i, d := range filter.Dims {
 		raw := rs.get(fields, d.Key, maxDimField)
 		if n := normalize.Dim(d.Key, raw); n != "" {
-			r.dimRaw[i], r.dimN[i] = raw, n
+			r.DimRaw[i], r.DimN[i] = raw, n
 		}
 	}
 	var techNames []string
@@ -308,41 +478,41 @@ func (rs *runState) build(fields []string) (record, string) {
 		for _, p := range techItems(t) {
 			if c := filter.CleanTech(p); c != "" && !seen[c] {
 				seen[c] = true
-				r.tech = append(r.tech, c)
+				r.Tech = append(r.Tech, c)
 				techNames = append(techNames, normalize.Truncate(normalize.Clean(p), 60))
-				if len(r.tech) == maxTech {
+				if len(r.Tech) == maxTech {
 					break
 				}
 			}
 		}
-		sort.Strings(r.tech)
+		sort.Strings(r.Tech)
 	}
-	r.extra = map[string]string{}
+	r.Extra = map[string]string{}
 	if len(techNames) > 0 { // shown in CSV exports; search uses tech_fts
-		r.extra["Technologies"] = normalize.Truncate(strings.Join(techNames, ", "), 2000)
+		r.Extra["Technologies"] = normalize.Truncate(strings.Join(techNames, ", "), 2000)
 	}
 	for k, f := range map[string]string{"Skills": FSkills, "Products": FProducts, "Keywords": FKeywords} {
 		if v := rs.get(fields, f, maxExtraVal); v != "" {
-			r.extra[k] = v
+			r.Extra[k] = v
 		}
 	}
 	for _, i := range rs.idx[FExtra] {
-		if i >= len(fields) || len(r.extra) >= maxExtraKeys {
+		if i >= len(fields) || len(r.Extra) >= maxExtraKeys {
 			continue
 		}
 		if v := normalize.Value(fields[i]); v != "" {
-			r.extra[rs.headers[i]] = normalize.Truncate(v, maxExtraVal)
+			r.Extra[rs.headers[i]] = normalize.Truncate(v, maxExtraVal)
 		}
 	}
 
-	if r.name == "" && r.email == "" && r.company == "" && r.phone == "" && r.liKey == "" {
+	if r.Name == "" && r.Email == "" && r.Company == "" && r.Phone == "" && r.LiKey == "" {
 		return r, "empty_row"
 	}
-	if r.email != "" {
-		r.emailKey = normalize.EmailKey(r.email)
+	if r.Email != "" {
+		r.EmailKey = normalize.EmailKey(r.Email)
 	}
-	r.hKey = normalize.HashKey(r.name, r.company, r.title, r.phone)
-	if r.emailKey == "" && r.liKey == "" && r.hKey == "" {
+	r.HKey = normalize.HashKey(r.Name, r.Company, r.Title, r.Phone)
+	if r.EmailKey == "" && r.LiKey == "" && r.HKey == "" {
 		return r, "no_identity"
 	}
 	return r, ""
@@ -375,389 +545,6 @@ func SuppressKeys(emailKey, liKey, hKey string) []string {
 		ks = append(ks, platform.SHA256Hex("h:"+hKey))
 	}
 	return ks
-}
-
-type stmts struct {
-	byEmail, byLi, byH, load, label                          *sql.Stmt
-	insC, insI, updC, updI, ftsDel, ftsIns, techDel, techIns *sql.Stmt
-	dimGet, dimIns, spell, supp                              *sql.Stmt
-}
-
-func prepare(ctx context.Context, tx *sql.Tx) (*stmts, error) {
-	s := &stmts{}
-	dimCols := make([]string, len(filter.Dims))
-	for i, d := range filter.Dims {
-		dimCols[i] = d.Key
-	}
-	cols := strings.Join(dimCols, ",")
-	sets := make([]string, len(dimCols))
-	for i, c := range dimCols {
-		sets[i] = c + "=?"
-	}
-	defs := []struct {
-		dst *(*sql.Stmt)
-		q   string
-	}{
-		{&s.byEmail, `SELECT id FROM contact_info WHERE email_key=?`},
-		{&s.byLi, `SELECT id FROM contact_info WHERE li_key=?`},
-		{&s.byH, `SELECT id FROM contact_info WHERE h_key=?`},
-		{&s.load, `SELECT ` + prefixed("c.", dimCols) + `, i.email_key, i.li_key, i.h_key, i.name, i.title, i.company,
-			i.website, i.linkedin, i.email, i.phone, i.extra FROM contacts c JOIN contact_info i ON i.id=c.id WHERE c.id=?`},
-		{&s.label, `SELECT value_n FROM dims WHERE id=?`},
-		{&s.insC, `INSERT INTO contacts(` + cols + `, has_email, has_phone) VALUES(` + db.Placeholders(len(dimCols)+2) + `)`},
-		{&s.insI, `INSERT INTO contact_info(id, email_key, li_key, h_key, name, title, company, website, linkedin, email, phone, extra, updated)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`},
-		{&s.updC, `UPDATE contacts SET ` + strings.Join(sets, ",") + `, has_email=?, has_phone=? WHERE id=?`},
-		{&s.updI, `UPDATE contact_info SET email_key=?, li_key=?, h_key=?, name=?, title=?, company=?, website=?, linkedin=?,
-			email=?, phone=?, extra=?, updated=? WHERE id=?`},
-		{&s.ftsDel, `DELETE FROM fts WHERE rowid=?`},
-		{&s.ftsIns, `INSERT INTO fts(rowid, txt) VALUES(?,?)`},
-		{&s.techDel, `DELETE FROM tech_fts WHERE rowid=?`},
-		{&s.techIns, `INSERT INTO tech_fts(rowid, txt) VALUES(?,?)`},
-		{&s.dimGet, `SELECT id FROM dims WHERE dim=? AND value_n=?`},
-		{&s.dimIns, `INSERT INTO dims(dim, value_n, label) VALUES(?,?,?) RETURNING id`},
-		{&s.spell, `INSERT INTO dim_spell(dim_id, raw, cnt) VALUES(?,?,?) ON CONFLICT(dim_id, raw) DO UPDATE SET cnt=cnt+excluded.cnt`},
-		{&s.supp, `SELECT 1 FROM suppress WHERE k IN (?,?,?) LIMIT 1`},
-	}
-	for _, d := range defs {
-		st, err := tx.PrepareContext(ctx, d.q)
-		if err != nil {
-			return nil, fmt.Errorf("prepare %q: %w", d.q[:min(40, len(d.q))], err)
-		}
-		*d.dst = st
-	}
-	return s, nil
-}
-
-func prefixed(p string, cols []string) string {
-	out := make([]string, len(cols))
-	for i, c := range cols {
-		out[i] = p + c
-	}
-	return strings.Join(out, ",")
-}
-
-func nullable(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-func (rs *runState) processBatch(ctx context.Context, batch [][]string) error {
-	now := rs.opt.Clock.Now().Unix()
-	rs.spell = map[int64]map[string]int64{}
-	return rs.im.DB.Tx(ctx, func(tx *sql.Tx) error {
-		s, err := prepare(ctx, tx)
-		if err != nil {
-			return err
-		}
-		for _, fields := range batch {
-			rec, reason := rs.build(fields)
-			if reason != "" {
-				rs.stats.Skipped++
-				rs.stats.Reasons[reason]++
-				continue
-			}
-			keys := SuppressKeys(rec.emailKey, rec.liKey, rec.hKey)
-			for len(keys) < 3 {
-				keys = append(keys, "")
-			}
-			var one int
-			if err := s.supp.QueryRowContext(ctx, keys[0], keys[1], keys[2]).Scan(&one); err == nil {
-				rs.stats.Skipped++
-				rs.stats.Reasons["suppressed"]++
-				continue
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-			if err := rs.upsert(ctx, s, &rec, now); err != nil {
-				return err
-			}
-		}
-		for id, m := range rs.spell {
-			for raw, n := range m {
-				if _, err := s.spell.ExecContext(ctx, id, raw, n); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
-}
-
-func (rs *runState) dimID(ctx context.Context, s *stmts, i int, valueN, raw string) (int64, error) {
-	if valueN == "" {
-		return int64(i + 1), nil // blank ids 1..12
-	}
-	m := rs.dimCache[i]
-	if m == nil {
-		m = map[string]int64{}
-		rs.dimCache[i] = m
-	}
-	id, ok := m[valueN]
-	if !ok {
-		err := s.dimGet.QueryRowContext(ctx, i+1, valueN).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = s.dimIns.QueryRowContext(ctx, i+1, valueN, raw).Scan(&id)
-		}
-		if err != nil {
-			return 0, err
-		}
-		if len(m) < 200_000 {
-			m[valueN] = id
-		}
-	}
-	rs.touched[id] = struct{}{}
-	sp := rs.spell[id]
-	if sp == nil {
-		sp = map[string]int64{}
-		rs.spell[id] = sp
-	}
-	sp[raw]++
-	return id, nil
-}
-
-func (rs *runState) find(ctx context.Context, s *stmts, r *record) (int64, error) {
-	try := func(st *sql.Stmt, k string) (int64, error) {
-		if k == "" {
-			return 0, nil
-		}
-		var id int64
-		err := st.QueryRowContext(ctx, k).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil
-		}
-		return id, err
-	}
-	for _, p := range []struct {
-		st *sql.Stmt
-		k  string
-	}{{s.byEmail, r.emailKey}, {s.byLi, r.liKey}, {s.byH, r.hKey}} {
-		id, err := try(p.st, p.k)
-		if err != nil || id != 0 {
-			return id, err
-		}
-	}
-	return 0, nil
-}
-
-// keyFree reports whether key is unused or already belongs to self.
-func keyFree(ctx context.Context, st *sql.Stmt, key string, self int64) (bool, error) {
-	var id int64
-	err := st.QueryRowContext(ctx, key).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return true, nil
-	}
-	return id == self, err
-}
-
-func (rs *runState) upsert(ctx context.Context, s *stmts, r *record, now int64) error {
-	var dims [12]int64
-	for i := range filter.Dims {
-		id, err := rs.dimID(ctx, s, i, r.dimN[i], r.dimRaw[i])
-		if err != nil {
-			return err
-		}
-		dims[i] = id
-	}
-	id, err := rs.find(ctx, s, r)
-	if err != nil {
-		return err
-	}
-	if id == 0 {
-		args := make([]any, 0, 14)
-		for _, d := range dims {
-			args = append(args, d)
-		}
-		args = append(args, b2i(r.email != ""), b2i(r.phone != ""))
-		res, err := s.insC.ExecContext(ctx, args...)
-		if err != nil {
-			return err
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return err
-		}
-		if _, err := s.insI.ExecContext(ctx, id, nullable(r.emailKey), nullable(r.liKey), nullable(r.hKey), r.name, r.title,
-			r.company, r.website, r.linkedin, r.email, r.phone, EncodeExtra(r.extra), now); err != nil {
-			return err
-		}
-		if err := rs.writeSearch(ctx, s, id, r, r.dimN[3], r.dimN[4], false); err != nil {
-			return err
-		}
-		if err := writeTech(ctx, s, id, r.tech, false); err != nil {
-			return err
-		}
-		rs.stats.Added++
-		return nil
-	}
-	return rs.merge(ctx, s, id, r, dims, now)
-}
-
-func (rs *runState) merge(ctx context.Context, s *stmts, id int64, r *record, dims [12]int64, now int64) error {
-	var old [12]int64
-	var ek, lk, hk sql.NullString
-	var name, title, company, website, linkedin, email, phone string
-	var extraBlob []byte
-	dst := make([]any, 0, 24)
-	for i := range old {
-		dst = append(dst, &old[i])
-	}
-	dst = append(dst, &ek, &lk, &hk, &name, &title, &company, &website, &linkedin, &email, &phone, &extraBlob)
-	if err := s.load.QueryRowContext(ctx, id).Scan(dst...); err != nil {
-		return err
-	}
-	changed := false
-	set := func(p *string, v string) {
-		if v != "" && *p != v {
-			*p, changed = v, true
-		}
-	}
-	set(&name, r.name)
-	set(&title, r.title)
-	set(&company, r.company)
-	set(&website, r.website)
-	set(&phone, r.phone)
-	newDims := old
-	for i := range filter.Dims {
-		if r.dimN[i] != "" && dims[i] != old[i] {
-			newDims[i], changed = dims[i], true
-		}
-	}
-	emailKey, liKey, hKey := ek.String, lk.String, hk.String
-	if r.email != "" && r.emailKey != emailKey {
-		if ok, err := keyFree(ctx, s.byEmail, r.emailKey, id); err != nil {
-			return err
-		} else if ok {
-			email, emailKey, changed = r.email, r.emailKey, true
-		}
-	}
-	if r.liKey != "" && r.liKey != liKey {
-		if ok, err := keyFree(ctx, s.byLi, r.liKey, id); err != nil {
-			return err
-		} else if ok {
-			linkedin, liKey, changed = r.linkedin, r.liKey, true
-		}
-	}
-	if hKey == "" && r.hKey != "" {
-		if ok, err := keyFree(ctx, s.byH, r.hKey, id); err != nil {
-			return err
-		} else if ok {
-			hKey, changed = r.hKey, true
-		}
-	}
-	extra := DecodeExtra(extraBlob)
-	techChanged := len(r.tech) > 0 && extra["Technologies"] != r.extra["Technologies"]
-	for k, v := range r.extra {
-		if extra[k] != v {
-			if len(extra) >= maxExtraKeys && extra[k] == "" {
-				continue
-			}
-			extra[k], changed = v, true
-		}
-	}
-	if !changed {
-		rs.stats.Unchanged++
-		return nil
-	}
-	args := make([]any, 0, 15)
-	for _, d := range newDims {
-		args = append(args, d)
-	}
-	args = append(args, b2i(email != ""), b2i(phone != ""), id)
-	if _, err := s.updC.ExecContext(ctx, args...); err != nil {
-		return err
-	}
-	if _, err := s.updI.ExecContext(ctx, nullable(emailKey), nullable(liKey), nullable(hKey), name, title, company, website,
-		linkedin, email, phone, EncodeExtra(extra), now, id); err != nil {
-		return err
-	}
-	merged := &record{name: name, title: title, company: company, extra: extra}
-	ind, err := valueN(ctx, s, newDims[3])
-	if err != nil {
-		return err
-	}
-	sec, err := valueN(ctx, s, newDims[4])
-	if err != nil {
-		return err
-	}
-	if err := rs.writeSearch(ctx, s, id, merged, ind, sec, true); err != nil {
-		return err
-	}
-	if techChanged {
-		if err := writeTech(ctx, s, id, r.tech, true); err != nil {
-			return err
-		}
-	}
-	rs.stats.Updated++
-	return nil
-}
-
-func valueN(ctx context.Context, s *stmts, id int64) (string, error) {
-	if id <= 12 {
-		return "", nil
-	}
-	var v string
-	err := s.label.QueryRowContext(ctx, id).Scan(&v)
-	return v, err
-}
-
-// ftsText is what keyword search matches: name, title, company, industry,
-// sector, skills, products and keywords.
-func ftsText(r *record, industry, sector string) string {
-	parts := []string{r.name, r.title, r.company, industry, sector, r.extra["Skills"], r.extra["Products"], r.extra["Keywords"]}
-	return strings.Join(parts, " \n ")
-}
-
-func (rs *runState) writeSearch(ctx context.Context, s *stmts, id int64, r *record, industry, sector string, replace bool) error {
-	if replace {
-		if _, err := s.ftsDel.ExecContext(ctx, id); err != nil {
-			return err
-		}
-	}
-	_, err := s.ftsIns.ExecContext(ctx, id, ftsText(r, industry, sector))
-	return err
-}
-
-func writeTech(ctx context.Context, s *stmts, id int64, tech []string, replace bool) error {
-	if replace {
-		if _, err := s.techDel.ExecContext(ctx, id); err != nil {
-			return err
-		}
-	}
-	if len(tech) == 0 {
-		return nil
-	}
-	_, err := s.techIns.ExecContext(ctx, id, strings.Join(tech, " "))
-	return err
-}
-
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-func (rs *runState) finalize(ctx context.Context) error {
-	ids := make([]int64, 0, len(rs.touched))
-	for id := range rs.touched {
-		ids = append(ids, id)
-	}
-	for len(ids) > 0 {
-		n := min(500, len(ids))
-		chunk := ids[:n]
-		ids = ids[n:]
-		args := make([]any, len(chunk))
-		for i, v := range chunk {
-			args[i] = v
-		}
-		if _, err := rs.im.DB.W.ExecContext(ctx, `UPDATE dims SET label = COALESCE((SELECT raw FROM dim_spell s
-			WHERE s.dim_id = dims.id ORDER BY s.cnt DESC, s.raw ASC LIMIT 1), label) WHERE id IN (`+db.Placeholders(n)+`)`, args...); err != nil {
-			return err
-		}
-	}
-	return Refresh(ctx, rs.im.DB)
 }
 
 // Refresh recomputes per-value counts and headline stats, bumps the dataset
