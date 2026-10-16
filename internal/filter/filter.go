@@ -263,7 +263,9 @@ func CleanTech(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return normalize.Truncate(strings.TrimSpace(strings.Join(strings.Fields(b.String()), " ")), MaxTechLen)
+	// trim after cutting too: a cut right after a space would leave one, and the
+	// next parse would drop it (two cache keys for one filter; found by fuzzing)
+	return strings.TrimSpace(normalize.Truncate(strings.Join(strings.Fields(b.String()), " "), MaxTechLen))
 }
 
 // Canonical encodes the filter as a sorted query string.
