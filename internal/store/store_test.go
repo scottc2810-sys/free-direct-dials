@@ -718,3 +718,43 @@ func (s slow) Count(ctx context.Context, f filter.Filter) (int64, error) {
 	}
 	return s.Backend.Count(ctx, f)
 }
+
+func TestRenormalizeAcrossStores(t *testing.T) {
+	_, parts := genParts(t, 400, 23, 2)
+	f, ids := newFed(t, 1)
+	im := newImporter(f)
+	runImport(t, im, f, ids[0], parts[0])
+	runImport(t, im, f, ids[1], parts[1])
+	ctx := context.Background()
+	extra := f.Member(ids[1]).B.(*SQLite)
+	// data from before "vice president" became an alias of "vp"
+	var oldID int64
+	if err := extra.DB.W.QueryRow(`INSERT INTO dims(dim, value_n, label) VALUES(7, 'vice president', 'Vice President') RETURNING id`).Scan(&oldID); err != nil {
+		t.Fatal(err)
+	}
+	extra.DB.W.Exec(`UPDATE contacts SET seniority=? WHERE id IN (SELECT id FROM contacts ORDER BY id LIMIT 5)`, oldID)
+	extra.DB.W.Exec(`DELETE FROM meta WHERE k='norm_version'`)
+	importer.Refresh(ctx, extra.DB)
+	f.syncMirror(ctx, f.Member(ids[1]))
+	before, _, _ := f.Count(ctx, flt(t, "seniority=vp"))
+	n, err := f.Renormalize(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("renormalize: %d %v", n, err)
+	}
+	fr, err := f.Facets(ctx, filter.Filter{}, "seniority", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range fr.Values {
+		if v.Value == "vice president" {
+			t.Fatalf("old value still offered: %+v", v)
+		}
+	}
+	after, _, _ := f.Count(ctx, flt(t, "seniority=Vice President")) // parses to "vp"
+	if after != before+5 {
+		t.Fatalf("vp contacts %d → %d, want +5", before, after)
+	}
+	if n, _ := f.Renormalize(ctx); n != 0 {
+		t.Fatal("must run once per normalize.Version")
+	}
+}

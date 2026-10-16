@@ -101,9 +101,24 @@ var rangeDash = strings.NewReplacer(" - ", "-", " -", "-", "- ", "-", "\xe2\x80\
 
 var dimPunct = strings.NewReplacer("&", " and ", ".", "", "'", "", "\xe2\x80\x99", "", ",", " ", ";", " ", "/", " ", "|", " ", "_", " ", "(", " ", ")", " ")
 
+// Version identifies the alias tables below. Raise it whenever they change:
+// every store then re-normalises its dictionary once (importer.RenormalizeDims),
+// merging values that now mean the same ("Vice President" and "VP").
+const Version = 4
+
 // Dim returns the normalised value used for dimension dictionaries. It returns
-// "" for blank markers. dim is the dimension key (only "country" has aliases).
+// "" for blank markers. dim is the dimension key (country, seniority and
+// department have alias tables).
 func Dim(dim, raw string) string {
+	if multiValued[dim] && strings.ContainsAny(raw, ",;|") {
+		// vendors sometimes list several ("CXO, VP"): the first real one counts
+		for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == '|' }) {
+			if v := Dim(dim, part); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
 	f := Fold(raw)
 	if blanks[f] {
 		return ""
@@ -113,12 +128,51 @@ func Dim(dim, raw string) string {
 	if blanks[f] {           // e.g. "'blank" or "(n/a)" only become a blank marker after punctuation is stripped
 		return ""
 	}
-	if dim == "country" {
-		if a, ok := countryAliases[f]; ok {
+	if !numericOK[dim] && !strings.ContainsFunc(f, unicode.IsLetter) {
+		return "" // a ZIP code or id in a text column is noise, not a value
+	}
+	if m := dimAliases[dim]; m != nil {
+		if a, ok := m[f]; ok {
 			return a
 		}
 	}
 	return f
+}
+
+// multiValued dimensions are single-choice even when a file lists several.
+var multiValued = map[string]bool{"seniority": true, "division": true, "decision": true}
+
+// numericOK dimensions may legitimately contain no letters (bands and scores).
+var numericOK = map[string]bool{"csize": true, "revenue": true, "econf": true}
+
+var dimAliases = map[string]map[string]string{"country": countryAliases, "seniority": seniorityAliases, "division": divisionAliases}
+
+// seniorityAliases fold the many ways exports write a level onto one value.
+var seniorityAliases = map[string]string{
+	"c level": "c-level", "c-suite": "c-level", "c suite": "c-level", "csuite": "c-level", "cxo": "c-level", "c-level executive": "c-level",
+	"c level executive": "c-level", "chief": "c-level", "chief officer": "c-level", "executive level": "c-level",
+	"vice president": "vp", "vice-president": "vp", "vice presidents": "vp", "vps": "vp", "vp level": "vp", "vp-level": "vp",
+	"svp": "vp", "evp": "vp", "avp": "vp", "senior vice president": "vp", "executive vice president": "vp",
+	"directors": "director", "dir": "director", "director level": "director", "director-level": "director",
+	"managers": "manager", "mgr": "manager", "manager level": "manager", "manager-level": "manager",
+	"sr": "senior", "senior level": "senior", "senior-level": "senior",
+	"junior": "entry", "jr": "entry", "entry level": "entry", "entry-level": "entry",
+	"owners": "owner", "partners": "partner", "founders": "founder", "co-founder": "founder", "co founder": "founder", "cofounder": "founder",
+	"heads": "head", "head of": "head", "interns": "intern", "internship": "intern", "trainee": "intern",
+	"non manager": "non-manager", "nonmanager": "non-manager", "non-managers": "non-manager",
+}
+
+// divisionAliases fold department spellings (dimPunct already turned & into "and").
+var divisionAliases = map[string]string{
+	"hr": "human resources", "human resource": "human resources", "people and culture": "human resources", "people operations": "human resources",
+	"it": "information technology", "information technology it": "information technology", "i t": "information technology",
+	"information technology systems": "information technology", "it systems": "information technology", "information systems": "information technology",
+	"eng": "engineering", "engineering and technical": "engineering", "engineering and technology": "engineering",
+	"r and d": "research and development", "rnd": "research and development", "randd": "research and development",
+	"bd": "business development", "biz dev": "business development", "bizdev": "business development",
+	"mktg": "marketing", "ops": "operations", "operation": "operations",
+	"fin": "finance", "c suite": "executive", "c-suite": "executive", "csuite": "executive", "executives": "executive",
+	"customer service": "customer support", "support": "customer support",
 }
 
 var countryAliases = map[string]string{

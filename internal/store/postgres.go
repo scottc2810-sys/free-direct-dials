@@ -295,6 +295,19 @@ func tsPrefixAll(words []string) string {
 	return strings.Join(parts, " & ")
 }
 
+// tsKeyword renders filter.KeywordTerms as tsquery input (the SQLite FTSQuery's twin).
+func tsKeyword(keyword string) string {
+	var parts []string
+	for _, term := range filter.KeywordTerms(keyword) {
+		ors := make([]string, len(term))
+		for i, alt := range term {
+			ors[i] = "(" + tsPrefixAll(alt) + ")"
+		}
+		parts = append(parts, "("+strings.Join(ors, " | ")+")")
+	}
+	return strings.Join(parts, " & ")
+}
+
 func techTSQuery(terms []string) string {
 	var ors []string
 	for _, g := range filter.TechQuery(terms) {
@@ -307,9 +320,7 @@ func techTSQuery(terms []string) string {
 
 func (p *Postgres) resolve(ctx context.Context, f filter.Filter) (*pgResolved, error) {
 	r := &pgResolved{f: f, ids: map[string][]int64{}, empty: map[string]bool{}, tech: techTSQuery(f.Tech)}
-	if f.Keyword != "" {
-		r.kw = tsPrefixAll(strings.Split(f.Keyword, " "))
-	}
+	r.kw = tsKeyword(f.Keyword)
 	ver := strconv.FormatInt(p.ver.Load(), 10)
 	var qd []int16
 	var qv []string
@@ -1055,6 +1066,110 @@ func (p *Postgres) Delete(ctx context.Context, ids []int64) (int, error) {
 }
 
 func (p *Postgres) Prune(ctx context.Context) error { return nil } // foreign keys cascade
+
+// Renormalize is importer.RenormalizeDims for Postgres.
+func (p *Postgres) Renormalize(ctx context.Context) (int, error) {
+	var cur string
+	p.pool.QueryRow(ctx, `SELECT v FROM fdd.meta WHERE k='norm_version'`).Scan(&cur)
+	if v, _ := strconv.Atoi(cur); v >= normalize.Version {
+		return 0, nil
+	}
+	type row struct {
+		id     int64
+		dim    int16
+		v, raw string
+	}
+	var list []row
+	rows, err := p.pool.Query(ctx, `SELECT id, dim, value_n, label FROM fdd.dims WHERE id > 12 ORDER BY id`)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.dim, &r.v, &r.raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	changed := 0
+	var touched []int64
+	for _, r := range list {
+		if r.dim < 1 || int(r.dim) > len(filter.Dims) {
+			continue
+		}
+		key := filter.Dims[r.dim-1].Key
+		n := normalize.Dim(key, r.raw)
+		if r.raw == "" {
+			n = normalize.Dim(key, r.v)
+		}
+		if n == r.v {
+			continue
+		}
+		changed++
+		target := int64(r.dim) // blank
+		if n != "" {
+			err := tx.QueryRow(ctx, `SELECT id FROM fdd.dims WHERE dim = $1 AND value_n = $2`, r.dim, n).Scan(&target)
+			if errors.Is(err, pgx.ErrNoRows) { // nothing to merge with: rename in place
+				if _, err := tx.Exec(ctx, `UPDATE fdd.dims SET value_n = $1 WHERE id = $2`, n, r.id); err != nil {
+					return 0, err
+				}
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE fdd.contacts SET `+key+` = $1 WHERE `+key+` = $2`, target, r.id); err != nil {
+			return 0, err
+		}
+		if target > 12 {
+			if _, err := tx.Exec(ctx, `INSERT INTO fdd.dim_spell(dim_id, raw, cnt) SELECT $1, raw, cnt FROM fdd.dim_spell WHERE dim_id = $2
+				ON CONFLICT (dim_id, raw) DO UPDATE SET cnt = fdd.dim_spell.cnt + excluded.cnt`, target, r.id); err != nil {
+				return 0, err
+			}
+			touched = append(touched, target)
+		}
+		for _, q := range []string{`DELETE FROM fdd.dim_spell WHERE dim_id = $1`, `DELETE FROM fdd.dims WHERE id = $1`} {
+			if _, err := tx.Exec(ctx, q, r.id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fdd.meta(k, v) VALUES('norm_version', $1) ON CONFLICT (k) DO UPDATE SET v = excluded.v`,
+		strconv.Itoa(normalize.Version)); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	if len(touched) > 0 {
+		if _, err := p.pool.Exec(ctx, `UPDATE fdd.dims d SET label = s.raw
+			FROM (SELECT DISTINCT ON (dim_id) dim_id, raw FROM fdd.dim_spell WHERE dim_id = ANY($1::bigint[]) ORDER BY dim_id, cnt DESC, raw) s
+			WHERE d.id = s.dim_id`, touched); err != nil {
+			return changed, err
+		}
+	}
+	if err := p.refreshCounts(ctx); err != nil {
+		return changed, err
+	}
+	if err := p.refreshStats(ctx); err != nil {
+		return changed, err
+	}
+	return changed, p.bump(ctx)
+}
 
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 

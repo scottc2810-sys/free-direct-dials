@@ -128,34 +128,76 @@ func truthy(s string) bool {
 
 // Tokens splits keyword input into searchable word tokens. Everything that is
 // not a letter or digit (FTS operators, quotes, %, _, emoji, SQL) is a
-// separator, so the result can never be an FTS syntax error.
+// separator, so the result can never be an FTS syntax error. Plurals are
+// reduced, stop words dropped and spelled-out job titles replaced by their
+// abbreviation ("Chief Executive Officers" → "ceo"), so equivalent searches
+// share one canonical form, cache entry and URL.
 func Tokens(kw string) []string {
-	kw = normalize.Fold(normalize.Truncate(kw, MaxKeyword))
+	kw = normalize.Fold(collapseDots(normalize.Truncate(kw, MaxKeyword)))
 	var toks []string
-	seen := map[string]bool{}
 	for _, t := range strings.FieldsFunc(kw, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-		if len([]rune(t)) < minTokenRune || seen[t] {
+		if len([]rune(t)) < minTokenRune {
 			continue
 		}
-		seen[t] = true
-		toks = append(toks, t)
-		if len(toks) == MaxTokens {
+		toks = append(toks, singular(t))
+		if len(toks) == 4*MaxTokens {
 			break
 		}
+	}
+	toks = dedupe(toks)
+	for i := 0; i < 5; i++ { // until stable: removing a duplicate can bring a phrase together
+		next := dedupe(canonicalTitles(toks))
+		if strings.Join(next, " ") == strings.Join(toks, " ") {
+			break
+		}
+		toks = next
+	}
+	if len(toks) > MaxTokens {
+		toks = toks[:MaxTokens]
 	}
 	return toks
 }
 
-// FTSQuery renders tokens as an FTS5 query: every word must prefix-match.
+func dedupe(toks []string) []string {
+	seen := map[string]bool{}
+	out := toks[:0:0]
+	for _, t := range toks {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// FTSQuery renders a canonical keyword for the SQLite FTS5 index: every term
+// must match, a job-title abbreviation matching any of its forms
+// (ceo → ("ceo"* OR ("chief"* AND "executive"*))), each word as a prefix.
 func FTSQuery(keyword string) string {
-	if keyword == "" {
-		return ""
+	var parts []string
+	for _, term := range KeywordTerms(keyword) {
+		parts = append(parts, ftsTerm(term))
 	}
-	parts := strings.Split(keyword, " ")
-	for i, p := range parts {
-		parts[i] = `"` + p + `"*` // tokens contain only letters/digits: no quote escaping needed
+	return strings.Join(parts, " AND ") // explicit: FTS5 has no implicit AND next to a (group)
+}
+
+func ftsTerm(alts [][]string) string {
+	word := func(w string) string { return `"` + w + `"*` } // tokens contain only letters/digits: no escaping needed
+	if len(alts) == 1 && len(alts[0]) == 1 {
+		return word(alts[0][0])
 	}
-	return strings.Join(parts, " ")
+	ors := make([]string, len(alts))
+	for i, a := range alts {
+		ws := make([]string, len(a))
+		for j, w := range a {
+			ws[j] = word(w)
+		}
+		ors[i] = strings.Join(ws, " AND ")
+		if len(ws) > 1 {
+			ors[i] = "(" + ors[i] + ")"
+		}
+	}
+	return "(" + strings.Join(ors, " OR ") + ")"
 }
 
 // TechQuery groups technology terms into prefix words: a contact matches when,

@@ -337,6 +337,10 @@ func (s *SQLite) Prune(ctx context.Context) error {
 	return err
 }
 
+func (s *SQLite) Renormalize(ctx context.Context) (int, error) {
+	return importer.RenormalizeDims(ctx, s.DB)
+}
+
 func (s *SQLite) Ping(ctx context.Context) error {
 	var one int
 	return s.DB.R.QueryRowContext(ctx, `SELECT 1`).Scan(&one)

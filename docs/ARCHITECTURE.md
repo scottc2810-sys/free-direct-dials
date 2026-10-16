@@ -210,6 +210,16 @@ Matching runs in priority order: `email_key` → `li_key` → `h_key`. The first
 
 ## 5. Filter engine — accuracy contract
 
+**Job titles and levels (2026-10-16).**
+- Keyword search treats a title abbreviation and its spelled-out forms as one thing, in both directions: CEO, C.E.O., CEOs and "chief executive officer(s)"; VP, "vice presidents" (SVP/EVP/AVP count as VP); HR, IT, MD, GM, BD, SDR, AE, PM and about 40 more (`filter/synonyms.go`).
+- The *query* is rewritten, not the index: `ceo` → `("ceo"* OR ("chief"* AND "executive"*))`. The same terms render as tsquery for Postgres, so every store, and data imported earlier, behaves the same, at the cost of a few extra index lookups.
+- Query words are reduced to singular prefixes ("presidents" → "president", "companies" → "compan"; every result is a prefix of the typed word, so nothing that matched before stops matching). Stop words are dropped ("head of sales" finds "Sales Head"), and dotted abbreviations are joined on both the query and index side.
+- The canonical keyword is the rewritten form, so "Chief Executive Officers" and "ceo" share one cache entry and URL. Fuzzed for idempotence (7 M executions).
+- Seniority and Department values have alias tables: "Vice President", "VP-Level" and "SVP" → **VP**; "C-Suite" → **C-Level**; "HR" → **Human Resources**; "R&D" → **Research and Development**; and so on.
+- Single-choice dimensions (seniority, department, decision power) take the first value of a vendor list ("CXO, VP" → C-Level). A text dimension value with no letters (a ZIP code in the wrong column) is blank; size, revenue and email-confidence bands may be numeric.
+- Each store re-applies them once per `normalize.Version` (the `normalize` job, at startup and daily), merging dictionary values with contacts, spelling counts, labels, per-value counts and mirrors kept exact.
+
+
 | Rule | Implementation |
 |---|---|
 | Normalisation | `fold(s)` = NFKD → strip combining marks → lower → trim → collapse whitespace. Blanks: `''`, `n/a`, `na`, `null`, `none`, `-`, `--`, `unknown`, `not available`, `0` *(only for dims)* → id 0. Country aliases (`us`, `usa`, `u.s.a.`, `united states of america` → `united states`; `uk`, `great britain` → `united kingdom`; `uae` …). |

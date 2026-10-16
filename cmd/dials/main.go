@@ -277,6 +277,14 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		fed.Cache.Purge()
 		return nil
 	}})
+	// seniority / department / country aliases: merge dictionary values once per normalize.Version
+	sched.Add(&jobs.Job{Name: "normalize", Daily: true, Hour: 5, Fn: func(ctx context.Context) error {
+		n, err := fed.Renormalize(ctx)
+		if n > 0 {
+			log.Info("merged dictionary values after alias update", "values", n)
+		}
+		return err
+	}})
 	// remote stores: keepalive writes (free Supabase projects pause after ~7 idle days),
 	// reconnects, sizes and quota alerts
 	sched.Add(&jobs.Job{Name: "stores", Every: 6 * time.Hour, Fn: func(ctx context.Context) error {
@@ -306,6 +314,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if len(fed.Members()) > 1 { // ping every remote database now, then every 6 hours
 		sched.RunNow(bg, "stores")
 	}
+	sched.RunNow(bg, "normalize") // merges values once after the alias tables grow (no-op otherwise)
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr, Handler: app.Handler(),

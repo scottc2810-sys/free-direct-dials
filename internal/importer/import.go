@@ -175,7 +175,7 @@ func Merge(cur *Stored, r *Record, dims [12]int64, keyFree KeyFree) (changed, te
 // sector, skills, products and keywords.
 func FTSText(name, title, company, industry, sector string, extra map[string]string) string {
 	parts := []string{name, title, company, industry, sector, extra["Skills"], extra["Products"], extra["Keywords"]}
-	return strings.Join(parts, " \n ")
+	return filter.CollapseDots(strings.Join(parts, " \n "))
 }
 
 // Preview returns sniffing info, headers, the automatic mapping and up to n rows.

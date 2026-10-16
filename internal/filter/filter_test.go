@@ -51,7 +51,7 @@ func TestKeywordSanitiser(t *testing.T) {
 		`🚀🚀`:                       "",
 		`ac`:                       "ac",
 		`AC  me`:                   "ac me",
-		`NEAR(a b) AND title:ceo*`: "near and title ceo",
+		`NEAR(a b) AND title:ceo*`: "near title ceo",
 		`José`:                     "jose",
 		`a b c`:                    "",
 	}
@@ -60,7 +60,7 @@ func TestKeywordSanitiser(t *testing.T) {
 			t.Errorf("Tokens(%q) = %q want %q", in, got, want)
 		}
 	}
-	if q := FTSQuery("ac me"); q != `"ac"* "me"*` {
+	if q := FTSQuery("ac me"); q != `"ac"* AND "me"*` {
 		t.Fatalf("FTSQuery = %s", q)
 	}
 }

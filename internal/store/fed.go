@@ -1182,6 +1182,36 @@ func (f *Federation) Prune(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// Renormalize applies the current alias tables (normalize.Version) to every
+// store once, merging dictionary values that now mean the same.
+func (f *Federation) Renormalize(ctx context.Context) (int, error) {
+	total := 0
+	var errs []error
+	for _, m := range f.Members() {
+		if m.B == nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Name, ErrUnavailable))
+			continue
+		}
+		n, err := m.B.Renormalize(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Name, err))
+			continue
+		}
+		total += n
+		if n > 0 && m.remote() {
+			if err := f.syncMirror(ctx, m); err != nil {
+				errs = append(errs, fmt.Errorf("%s mirror: %w", m.Name, err))
+			}
+		}
+	}
+	if total > 0 {
+		f.bump(ctx)
+		f.init()
+		f.Cache.Purge()
+	}
+	return total, errors.Join(errs...)
+}
+
 // ---------- removals ----------
 
 // Remove deletes every contact matching a removal identity in every store

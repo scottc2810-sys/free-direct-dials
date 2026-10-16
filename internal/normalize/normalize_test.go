@@ -110,3 +110,43 @@ func TestHashKeyStable(t *testing.T) {
 		t.Fatal("no name → no hash identity")
 	}
 }
+
+func TestDimAliases(t *testing.T) {
+	for dim, m := range dimAliases {
+		for from, to := range m {
+			if got := Dim(dim, to); got != to {
+				t.Errorf("%s alias target %q is not a fixed point (→ %q)", dim, to, got)
+			}
+			if got := Dim(dim, from); got != to {
+				t.Errorf("Dim(%s, %q) = %q, want %q", dim, from, got, to)
+			}
+		}
+	}
+	for raw, want := range map[string]string{"Vice President": "vp", "VP-Level": "vp", "C-Suite": "c-level", "C Level": "c-level",
+		"Directors": "director", "Entry Level": "entry", "Co-Founder": "founder"} {
+		if got := Dim("seniority", raw); got != want {
+			t.Errorf("seniority %q = %q, want %q", raw, got, want)
+		}
+	}
+	for raw, want := range map[string]string{"HR": "human resources", "R&D": "research and development", "IT": "information technology",
+		"Biz Dev": "business development", "Human Resources": "human resources"} {
+		if got := Dim("division", raw); got != want {
+			t.Errorf("division %q = %q, want %q", raw, got, want)
+		}
+	}
+	for raw, want := range map[string]string{"CXO, VP": "c-level", "Owner, Director": "owner", "Director; Manager": "director",
+		" , VP": "vp", "37214": "", "80234": ""} {
+		if got := Dim("seniority", raw); got != want {
+			t.Errorf("seniority %q = %q, want %q", raw, got, want)
+		}
+	}
+	if Dim("city", "90291") != "" || Dim("csize", "10-19") != "10-19" || Dim("revenue", "$1-10") == "" || Dim("econf", "95") != "95" {
+		t.Error("letterless values: text columns blank, bands and scores kept")
+	}
+	if Dim("industry", "Food, Beverages") != "food beverages" {
+		t.Error("only single-choice dimensions take the first listed value")
+	}
+	if Dim("city", "VP") != "vp" || Dim("industry", "IT") != "it" {
+		t.Error("aliases must only apply to their own dimension")
+	}
+}

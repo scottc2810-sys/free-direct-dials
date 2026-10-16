@@ -265,3 +265,41 @@ func TestDeleteSuppressesAndFixesCounts(t *testing.T) {
 		t.Fatalf("phone lookup: %v", phoneIDs)
 	}
 }
+
+func TestRenormalizeMergesOldValues(t *testing.T) {
+	im, d := newImporter(t)
+	run(t, im, basic)
+	ctx := context.Background()
+	// simulate data imported before "vice president" became an alias of "vp":
+	// one contact already on "vp", two on the old spelling (merge, not rename)
+	var vpID int64
+	if err := d.W.QueryRow(`INSERT INTO dims(dim, value_n, label) VALUES(7, 'vp', 'VP') RETURNING id`).Scan(&vpID); err != nil {
+		t.Fatal(err)
+	}
+	d.W.Exec(`UPDATE contacts SET seniority=? WHERE id = (SELECT MAX(id) FROM contacts)`, vpID)
+	var oldID int64
+	if err := d.W.QueryRow(`INSERT INTO dims(dim, value_n, label) VALUES(7, 'vice president', 'Vice President') RETURNING id`).Scan(&oldID); err != nil {
+		t.Fatal(err)
+	}
+	d.W.Exec(`INSERT INTO dim_spell(dim_id, raw, cnt) VALUES(?, 'Vice President', 2)`, oldID)
+	d.W.Exec(`UPDATE contacts SET seniority=? WHERE id IN (SELECT id FROM contacts ORDER BY id LIMIT 2)`, oldID)
+	d.W.Exec(`DELETE FROM meta WHERE k='norm_version'`)
+	total := scalar(t, d, `SELECT COUNT(*) FROM contacts`)
+	n, err := RenormalizeDims(ctx, d)
+	if err != nil || n != 1 {
+		t.Fatalf("renormalize: %d %v", n, err)
+	}
+	if scalar(t, d, `SELECT COUNT(*) FROM dims WHERE value_n='vice president'`) != 0 {
+		t.Fatal("old value still in the dictionary")
+	}
+	vp := scalar(t, d, `SELECT COUNT(*) FROM contacts c JOIN dims x ON x.id=c.seniority WHERE x.value_n='vp'`)
+	if vp != 3 || scalar(t, d, `SELECT cnt FROM dims WHERE dim=7 AND value_n='vp'`) != vp {
+		t.Fatalf("merged contacts %d, counted %d", vp, scalar(t, d, `SELECT cnt FROM dims WHERE dim=7 AND value_n='vp'`))
+	}
+	if scalar(t, d, `SELECT COUNT(*) FROM contacts`) != total {
+		t.Fatal("contacts lost")
+	}
+	if n, _ := RenormalizeDims(ctx, d); n != 0 {
+		t.Fatal("must run once per normalize.Version")
+	}
+}

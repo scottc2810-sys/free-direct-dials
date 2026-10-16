@@ -364,3 +364,34 @@ func TestLRUBounds(t *testing.T) {
 		t.Fatalf("LRU over budget: %+v", st)
 	}
 }
+
+func TestTitleSynonymsMatchBothWays(t *testing.T) {
+	d := dbtest.Open(t)
+	im := &importer.Importer{DB: d, Disposable: emailcheck.NewDisposable()}
+	csv := "Name,Title,Company,Email,Country\n" +
+		"A One,CEO,Acme,a1@acme.com,USA\n" +
+		"B Two,Chief Executive Officer,Beta,b2@beta.com,USA\n" +
+		"C Three,C.E.O.,Gamma,c3@gamma.com,USA\n" +
+		"D Four,VP Sales,Delta,d4@delta.com,USA\n" +
+		"E Five,Vice President of Sales,Eps,e5@eps.com,USA\n" +
+		"F Six,SVP Operations,Zeta,f6@zeta.com,USA\n" +
+		"G Seven,Head of Sales,Eta,g7@eta.com,USA\n" +
+		"H Eight,Human Resources Manager,Theta,h8@theta.com,USA\n" +
+		"I Nine,HR Manager,Iota,i9@iota.com,USA\n" +
+		"J Ten,Account Executive,Kappa,j10@kappa.com,USA\n"
+	if _, err := im.Run(context.Background(), strings.NewReader(csv), importer.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(d, NewLRU(1<<20, nil), 4)
+	for kw, want := range map[string]int64{
+		"ceo": 3, "CEOs": 3, "chief executive officer": 3, "c.e.o": 3,
+		"vp": 3, "vice president": 3, "vice presidents": 3, "vp sales": 2,
+		"head of sales": 1, "sales": 3,
+		"hr": 2, "human resources": 2, "hr managers": 2,
+		"account executive": 1, "ae": 1,
+	} {
+		if got := count(t, s, "kw="+url.QueryEscape(kw)); got != want {
+			t.Errorf("kw=%q: %d contacts, want %d", kw, got, want)
+		}
+	}
+}

@@ -147,6 +147,9 @@ type Backend interface {
 	SuppressKeys(ctx context.Context, ids []int64) ([]string, error)
 	Delete(ctx context.Context, ids []int64) (int, error)
 	Prune(ctx context.Context) error // drop unlocks whose contact is gone
+	// Renormalize re-applies the current alias tables to the dictionary once per
+	// normalize.Version, merging values that now mean the same; returns how many changed.
+	Renormalize(ctx context.Context) (int, error)
 
 	Ping(ctx context.Context) error
 	Keepalive(ctx context.Context, now int64) error // a real write: keeps free-tier projects from pausing
