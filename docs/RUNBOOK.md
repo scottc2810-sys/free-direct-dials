@@ -7,6 +7,8 @@
 
 ## 1. First-time setup (about 1 hour)
 
+> Deploying from Windows with PuTTY? [DEPLOY.md](DEPLOY.md) walks through all of this with the release bundle and `deploy/install.sh`, which automates 1.2 and most of 1.4.
+
 ### 1.1 Cloudflare (domain `markemindai.com` must use Cloudflare DNS)
 1. **DNS:** add `A origin-dials → <VPS IP>`, **Proxied** (orange cloud).
 2. **SSL/TLS → Origin Server → Create certificate** for `markemindai.com, *.markemindai.com` (15 years). Save it as `/etc/caddy/origin.pem` and the key as `/etc/caddy/origin-key.pem` (`chown root:caddy`, `chmod 0640`).

@@ -504,7 +504,11 @@ func pgDSN(t *testing.T) string {
 			sc := bufio.NewScanner(fh)
 			for sc.Scan() {
 				if v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "DIALS_TEST_PG_DSN="); ok {
-					return strings.Trim(v, `"'`)
+					v = strings.Trim(v, `"'`)
+					if strings.Contains(v, "YOUR-PASSWORD") || strings.Contains(v, "REGION") {
+						t.Skip("data/test-supabase.env still has the placeholder: paste the Session pooler URI with your password")
+					}
+					return v
 				}
 			}
 		}
@@ -514,6 +518,7 @@ func pgDSN(t *testing.T) string {
 	return ""
 }
 
+// resetPG drops schema fdd, but never one holding contacts the tests didn't create.
 func resetPG(t *testing.T, dsn string) {
 	t.Helper()
 	ctx := context.Background()
@@ -522,6 +527,13 @@ func resetPG(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	defer p.Close()
+	var n int64
+	var marker string
+	p.pool.QueryRow(ctx, `SELECT count(*) FROM fdd.contacts`).Scan(&n)
+	p.pool.QueryRow(ctx, `SELECT v FROM fdd.meta WHERE k='test_db'`).Scan(&marker)
+	if n > 0 && marker != "1" {
+		t.Fatalf("schema fdd in this database holds %d contacts the tests didn't create: refusing to wipe it (use a throwaway project)", n)
+	}
 	if _, err := p.pool.Exec(ctx, `DROP SCHEMA IF EXISTS fdd CASCADE`); err != nil {
 		t.Fatal(err)
 	}
@@ -536,6 +548,9 @@ func newPGFed(t *testing.T) (*Federation, int) {
 	m, err := f.Add(context.Background(), "supabase test", KindPostgres, dsn, 500<<20)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := m.B.(*Postgres).pool.Exec(context.Background(), `INSERT INTO fdd.meta(k, v) VALUES('test_db', '1') ON CONFLICT (k) DO UPDATE SET v = '1'`); err != nil {
+		t.Fatal(err) // marks the schema as test data, so resetPG may drop it
 	}
 	return f, m.ID
 }

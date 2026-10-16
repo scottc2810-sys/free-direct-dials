@@ -1,6 +1,7 @@
 # build output
 /bin/
 /build/
+/dist/
 # local data: never commit databases, uploads, backups or vendor files (personal data)
 /data/
 /bench/

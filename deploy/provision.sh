@@ -122,6 +122,9 @@ systemctl daemon-reload
 systemctl enable --now dials-cf-refresh.timer fstrim.timer >/dev/null
 [[ -f /etc/systemd/system/dials.service ]] && systemctl enable dials >/dev/null || true
 
-echo
-echo "Done. Next: copy deploy/dials.service to /etc/systemd/system/, deploy/Caddyfile to /etc/caddy/,"
-echo "fill /etc/dials/dials.env, add the Origin CA cert, then run deploy/deploy.sh from your machine."
+if [[ -z "${FROM_INSTALLER:-}" ]]; then
+  echo
+  echo "Done. Next: copy deploy/dials.service to /etc/systemd/system/, deploy/Caddyfile to /etc/caddy/,"
+  echo "fill /etc/dials/dials.env, add the Origin CA cert, then run deploy/deploy.sh from your machine"
+  echo "(or use the release bundle: sudo ADMIN_IPS=... bash deploy/install.sh, see docs/DEPLOY.md)."
+fi

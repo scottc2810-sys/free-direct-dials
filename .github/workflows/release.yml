@@ -1,0 +1,28 @@
+name: release
+# Push a tag like v1.0.0 → tests (race detector) → linux amd64 + arm64 bundles →
+# GitHub Release with the bundles and SHA256SUMS. Deploy: docs/DEPLOY.md.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: build bundles
+        run: bash deploy/make-release.sh "$GITHUB_REF_NAME"
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --title "Free Direct Dials $GITHUB_REF_NAME" --notes-file docs/RELEASE_NOTES.md --verify-tag
