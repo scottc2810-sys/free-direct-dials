@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -599,24 +600,25 @@ func TestPostgresOnlyStoreAndRemoval(t *testing.T) {
 	sort.Strings(keys)
 }
 
-// counting is a backend that counts the calls it receives.
+// counting is a backend that counts the calls it receives (from any goroutine:
+// background searches and prefetches run concurrently).
 type counting struct {
 	Backend
-	calls *int
+	calls *atomic.Int64
 }
 
 func (c counting) Count(ctx context.Context, f filter.Filter) (int64, error) {
-	*c.calls++
+	c.calls.Add(1)
 	return c.Backend.Count(ctx, f)
 }
 
 func (c counting) Page(ctx context.Context, f filter.Filter, offset, limit int) ([]search.Row, error) {
-	*c.calls++
+	c.calls.Add(1)
 	return c.Backend.Page(ctx, f, offset, limit)
 }
 
 func (c counting) Facet(ctx context.Context, f filter.Filter, dim, q string, limit int) ([]FacetCount, bool, error) {
-	*c.calls++
+	c.calls.Add(1)
 	return c.Backend.Facet(ctx, f, dim, q, limit)
 }
 
@@ -627,9 +629,10 @@ func TestRemoteStoreAskedOnlyWhenNeeded(t *testing.T) {
 	runImport(t, im, f, ids[0], parts[0])
 	runImport(t, im, f, ids[1], parts[1])
 	ctx := context.Background()
-	calls := 0
+	var counter atomic.Int64
 	m := f.Member(ids[1])
-	m.B = counting{m.B, &calls}
+	m.B = counting{m.B, &counter}
+	calls := func() int64 { return counter.Load() }
 	// totals, single filters, plain dropdowns, stats and labels: all from the local mirror
 	for _, raw := range []string{"", "country=usa", "industry=software", "country=usa&country=india"} {
 		if _, st, err := f.Count(ctx, flt(t, raw)); err != nil || st.Pending {
@@ -642,26 +645,26 @@ func TestRemoteStoreAskedOnlyWhenNeeded(t *testing.T) {
 	f.Labels(ctx, "country", []string{"united states"})
 	// a filter value the remote store doesn't have: never asked
 	f.Count(ctx, flt(t, "country=atlantis&kw=chief"))
-	if calls != 0 {
-		t.Fatalf("remote store asked %d times for answers the mirror has", calls)
+	if calls() != 0 {
+		t.Fatalf("remote store asked %d times for answers the mirror has", calls())
 	}
 	// page 1 comes from the built-in store alone when it has enough rows
 	pv, err := f.Preview(ctx, flt(t, "country=usa"), 0, 10, 5)
-	if err != nil || len(pv.Rows) != 10 || calls != 0 {
-		t.Fatalf("first page touched the remote store: calls=%d rows=%d %v", calls, len(pv.Rows), err)
+	if err != nil || len(pv.Rows) != 10 || calls() != 0 {
+		t.Fatalf("first page touched the remote store: calls=%d rows=%d %v", calls(), len(pv.Rows), err)
 	}
 	// a two-condition count needs it once; the same question again is cached
 	f.Count(ctx, flt(t, "country=usa&email=1"))
 	f.Count(ctx, flt(t, "country=usa&email=1"))
-	if calls != 1 {
-		t.Fatalf("remote count calls = %d, want 1", calls)
+	if calls() != 1 {
+		t.Fatalf("remote count calls = %d, want 1", calls())
 	}
 	// a page past the built-in store's matches searches the remote store
 	local, _ := f.Member(0).B.Count(ctx, flt(t, "kw=chief"))
 	last := int(local / 10)
-	before := calls
+	before := calls()
 	pv, err = f.Preview(ctx, flt(t, "kw=chief"), last, 10, 1000)
-	if err != nil || pv.Pending || calls == before {
+	if err != nil || pv.Pending || calls() == before {
 		t.Fatalf("the next store was not searched: %+v %v", pv, err)
 	}
 	for _, r := range pv.Rows[int(local%10):] {
